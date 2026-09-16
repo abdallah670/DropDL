@@ -28,6 +28,8 @@ export const QueuePage: React.FC = () => {
     pauseAll,
     resumeAll,
     cancelAll,
+    retryAll,
+    retryTask,
     clearCompleted,
     setActiveNav,
   } = useAppStore();
@@ -41,6 +43,10 @@ export const QueuePage: React.FC = () => {
   // Anything that can still be stopped: running, queued or paused tasks.
   const cancellableCount = queue.filter((t) =>
     ["downloading", "queued", "paused", "processing", "merging", "analyzing"].includes(t.status)
+  ).length;
+  // Failed or cancelled tasks that can be re-queued with one click.
+  const retryableCount = queue.filter(
+    (t) => t.status === "failed" || t.status === "cancelled"
   ).length;
 
   // Aggregate batch progress across all pending tasks (playlist/queue level view)
@@ -121,6 +127,15 @@ export const QueuePage: React.FC = () => {
           >
             <X className="w-3.5 h-3.5" />
             <span>Cancel All</span>
+          </button>
+
+          <button
+            onClick={retryAll}
+            disabled={retryableCount === 0}
+            className="flex items-center space-x-1 px-3 py-1.5 rounded bg-sky-950/60 hover:bg-sky-900/60 disabled:opacity-40 text-xs font-medium text-sky-300 transition-colors border border-sky-900"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>Retry All</span>
           </button>
 
           <button
@@ -302,6 +317,16 @@ export const QueuePage: React.FC = () => {
                         title="Resume download"
                       >
                         <Play className="w-4 h-4 text-emerald-400" />
+                      </button>
+                    )}
+
+                    {(task.status === "failed" || task.status === "cancelled") && (
+                      <button
+                        onClick={() => retryTask(task.id)}
+                        className="p-1.5 rounded bg-sky-950/60 hover:bg-sky-900/60 text-neutral-200 transition-colors border border-sky-900"
+                        title="Retry this download"
+                      >
+                        <RotateCcw className="w-4 h-4 text-sky-400" />
                       </button>
                     )}
 

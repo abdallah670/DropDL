@@ -9,74 +9,118 @@ export interface PersistedPaths {
   favoriteFolders: string[];
 }
 
+/** The whole persisted app state, assembled from the per-section files. */
 export interface PersistedState {
   version: number;
   settings: AppSettings | null;
   history: DownloadTask[];
   paths: PersistedPaths;
-  /** Resumable tasks (queued/paused/failed) restored on next launch. */
+  /** Resumable tasks (queued/paused/failed/cancelled) restored on next launch. */
   queue: DownloadTask[];
 }
 
 const CURRENT_VERSION = 2;
-const CONFIG_FILENAME = "config.json";
 const HISTORY_CAP = 200;
 const QUEUE_CAP = 200;
 
-/** Statuses worth keeping across restarts. Everything else is dropped. */
-const RESUMABLE_STATUSES = new Set(["queued", "paused", "failed"]);
-
 /**
- * Migrate a parsed config of ANY previous version to the current shape.
- * - v1 → v2: adds the persisted `queue`.
- * - Runtime statuses (downloading/processing/merging/analyzing) can't survive a
- *   restart, so they are demoted to "paused" (yt-dlp resumes from .part files).
- * - logs are stripped (verbose, not durable state).
+ * Sectioned persistence — one file per part of the app state, all inside the
+ * OS app-data dir:
+ *
+ *   settings.json — app settings + folder paths (small, rarely changes)
+ *   history.json  — completed downloads (large, written on completion only)
+ *   queue.json    — pending/paused/failed/cancelled tasks (written often)
+ *
+ * Splitting them means a queue progress tick no longer re-serialises the whole
+ * 200-entry history every second, and a damaged history file can never take
+ * the download queue down with it.
  */
-function migrateState(parsed: any): PersistedState {
-  const rawQueue: any[] = Array.isArray(parsed.queue) ? parsed.queue : [];
+export const DATA_FILES = {
+  settings: "settings.json",
+  history: "history.json",
+  queue: "queue.json",
+} as const;
 
-  const resumableQueue: DownloadTask[] = rawQueue
-    .filter((t) => t && typeof t === "object" && typeof t.id === "string" && typeof t.url === "string")
-    .filter((t) => RESUMABLE_STATUSES.has(t.status) || t.status === "downloading" || t.status === "processing" || t.status === "merging" || t.status === "analyzing")
-    .map((t) => ({
+export type DataSection = keyof typeof DATA_FILES;
+
+/** Pre-split single-file layout, migrated to the split files on first launch. */
+const LEGACY_CONFIG_FILENAME = "config.json";
+
+/** Statuses that survive a restart as-is (everything else is dropped/demoted). */
+const RESUMABLE_STATUSES = new Set(["queued", "paused", "failed", "cancelled"]);
+
+/** Normalise a task list read from disk (shared by the files + legacy config). */
+function normalizeTasks(raw: unknown): DownloadTask[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(
+      (t) => t && typeof t === "object" && typeof t.id === "string" && typeof t.url === "string"
+    )
+    .map((t: any) => ({
       ...t,
-      status: RESUMABLE_STATUSES.has(t.status) ? t.status : "paused",
+      // logs are verbose runtime noise, not durable state
       logs: [],
       speed: 0,
       etaSeconds: 0,
       postProcessingStep: undefined,
-    }))
-    .slice(0, QUEUE_CAP);
+    })) as DownloadTask[];
+}
 
+function normalizeHistory(raw: unknown): DownloadTask[] {
+  return normalizeTasks(raw).slice(0, HISTORY_CAP);
+}
+
+/**
+ * Queue contents kept across restarts. Runtime-only statuses (downloading,
+ * processing, merging, analyzing) become "paused" because yt-dlp keeps `.part`
+ * files and resumes from them. Completed tasks are dropped (they live in
+ * history), while cancelled/failed tasks are kept as-is so "Retry All" still
+ * works after a restart instead of forcing the user to re-paste the URL.
+ */
+function normalizeQueue(raw: unknown): DownloadTask[] {
+  return normalizeTasks(raw)
+    .filter((t) => t.status !== "completed")
+    .slice(0, QUEUE_CAP)
+    .map((t) => ({
+      ...t,
+      status: RESUMABLE_STATUSES.has(t.status) ? t.status : ("paused" as const),
+    }));
+}
+
+function normalizePaths(raw: any): PersistedPaths {
   return {
-    version: CURRENT_VERSION,
-    settings: parsed.settings ?? null,
-    history: Array.isArray(parsed.history) ? parsed.history.slice(0, HISTORY_CAP) : [],
-    paths: {
-      lastDownloadFolder:
-        typeof parsed.paths?.lastDownloadFolder === "string" ? parsed.paths.lastDownloadFolder : "",
-      favoriteFolders: Array.isArray(parsed.paths?.favoriteFolders)
-        ? parsed.paths.favoriteFolders.filter((f: unknown) => typeof f === "string")
-        : [],
-    },
-    queue: resumableQueue,
+    lastDownloadFolder:
+      typeof raw?.lastDownloadFolder === "string" ? raw.lastDownloadFolder : "",
+    favoriteFolders: Array.isArray(raw?.favoriteFolders)
+      ? raw.favoriteFolders.filter((f: unknown) => typeof f === "string")
+      : [],
   };
 }
 
-/** Resolve the AppData dir via Tauri path API */
-async function getConfigPath(): Promise<string | null> {
-  try {
-    const tauri = (window as any).__TAURI__;
-    if (!tauri?.path?.appDataDir) return null;
-    const appDataDir: string = await tauri.path.appDataDir();
-    // Tauri's path.join util
-    return tauri.path.join
-      ? await tauri.path.join(appDataDir, CONFIG_FILENAME)
-      : `${appDataDir}/${CONFIG_FILENAME}`;
-  } catch {
-    return null;
+/** Assemble the full state from the split files (any of them may be missing). */
+function assembleState(settingsPart: any, historyPart: any, queuePart: any): PersistedState {
+  return {
+    version: CURRENT_VERSION,
+    settings: (settingsPart?.settings as AppSettings) ?? null,
+    paths: normalizePaths(settingsPart?.paths),
+    history: normalizeHistory(historyPart?.history),
+    queue: normalizeQueue(queuePart?.queue),
+  };
+}
+
+/**
+ * Convert a legacy single-file config.json (ANY previous version) into the
+ * current shape: v1 had no persisted queue, runtime statuses are demoted and
+ * logs are stripped.
+ */
+function migrateLegacyConfig(parsed: any): PersistedState {
+  if (!parsed || typeof parsed !== "object") return assembleState(null, null, null);
+  if (parsed.version !== CURRENT_VERSION) {
+    console.warn(
+      `[PersistenceService] Migrating config version ${parsed.version} → ${CURRENT_VERSION}.`
+    );
   }
+  return assembleState(parsed, parsed, parsed);
 }
 
 /** In-memory fallback for non-Tauri runtimes (plain browser preview). */
@@ -99,107 +143,121 @@ function writeWebFallback(raw: string): boolean {
   }
 }
 
-/** Read and parse the persisted state from disk. Returns null on any failure. */
+/**
+ * Read the persisted state from disk (settings.json + history.json +
+ * queue.json). Returns null when nothing has ever been saved.
+ */
 export async function loadPersistedState(): Promise<PersistedState | null> {
-  try {
-    const tauri = (window as any).__TAURI__;
+  const tauri = (window as any).__TAURI__;
 
-    // Preferred path: native Rust command (bypasses fs-plugin scope entirely)
-    if (tauri?.invoke) {
+  if (tauri?.invoke) {
+    try {
+      const [settingsPart, historyPart, queuePart] = await Promise.all([
+        tauri.invoke("load_data_file", { name: "settings" }),
+        tauri.invoke("load_data_file", { name: "history" }),
+        tauri.invoke("load_data_file", { name: "queue" }),
+      ]);
+
+      const state = assembleState(settingsPart, historyPart, queuePart);
+      const isFirstRun =
+        settingsPart == null && historyPart == null && queuePart == null;
+
+      // Legacy single config.json: migrate whatever section has no file of its
+      // own yet (this also covers a partial migration, e.g. settings.json was
+      // written but queue.json wasn't — the saved batch is still recovered).
+      // A damaged legacy file must not take the split files down with it.
+      let legacy: any = null;
       try {
-        const result = await tauri.invoke("load_config");
-        if (result) return validateParsed(result);
-        // File doesn't exist yet — first run
-        return null;
+        legacy = await tauri.invoke("load_config");
       } catch (err) {
-        console.warn("[PersistenceService] Native load_config failed:", err);
+        console.warn(
+          `[PersistenceService] Legacy ${LEGACY_CONFIG_FILENAME} could not be read ` +
+            `(ignored, split data files are used):`,
+          err
+        );
       }
+      if (legacy) {
+        const migrated = migrateLegacyConfig(legacy);
+        if (settingsPart == null) {
+          state.settings = migrated.settings;
+          state.paths = migrated.paths;
+        }
+        if (historyPart == null) state.history = migrated.history;
+        if (queuePart == null) state.queue = migrated.queue;
+
+        console.info(
+          `[PersistenceService] Migrating legacy ${LEGACY_CONFIG_FILENAME} to split data files ` +
+            `(settings, history, queue)…`
+        );
+        await savePersistedState(state);
+        try {
+          await tauri.invoke("archive_legacy_config");
+        } catch (err) {
+          console.warn("[PersistenceService] Could not archive legacy config.json:", err);
+        }
+        return state;
+      }
+
+      if (isFirstRun) return null;
+      // Sections written so far, with the not-yet-written ones empty.
+      return state;
+    } catch (err) {
+      console.warn("[PersistenceService] Native load failed:", err);
+      return null;
     }
+  }
 
-    if (!tauri?.fs?.readTextFile) {
-      // Non-Tauri runtime (browser preview) — fall back to localStorage
-      const raw = readWebFallback();
-      if (!raw) return null;
-      return validateParsed(JSON.parse(raw));
-    }
-
-    const configPath = await getConfigPath();
-    if (!configPath) return readWebFallback() ? validateParsed(JSON.parse(readWebFallback()!)) : null;
-
-    const raw = await tauri.fs.readTextFile(configPath);
-    return validateParsed(JSON.parse(raw));
+  // Non-Tauri runtime (browser preview) — single localStorage blob.
+  const raw = readWebFallback();
+  if (!raw) return null;
+  try {
+    return migrateLegacyConfig(JSON.parse(raw));
   } catch {
-    // File doesn't exist yet — first run
     return null;
   }
 }
 
-/** Validate a parsed config object against the expected schema shape. */
-function validateParsed(parsed: any): PersistedState | null {
-  if (!parsed || typeof parsed !== "object") return null;
+/**
+ * Last payload written per section, so unchanged sections are skipped. Queue
+ * progress ticks fire saves frequently; without this the (much larger) history
+ * file would be rewritten on every tick.
+ */
+const lastWritten = new Map<DataSection, string>();
 
-  if (parsed.version !== CURRENT_VERSION) {
-    console.warn(
-      `[PersistenceService] Migrating config version ${parsed.version} → ${CURRENT_VERSION}.`
-    );
+/**
+ * Serialize and write the state — one file per section, each written
+ * atomically on the Rust side (tmp file + rename).
+ */
+export async function savePersistedState(state: Omit<PersistedState, "version">): Promise<void> {
+  const tauri = (window as any).__TAURI__;
+
+  if (tauri?.invoke) {
+    const sections: { section: DataSection; payload: Record<string, unknown> }[] = [
+      {
+        section: "settings",
+        payload: { version: CURRENT_VERSION, settings: state.settings, paths: state.paths },
+      },
+      { section: "history", payload: { version: CURRENT_VERSION, history: state.history } },
+      { section: "queue", payload: { version: CURRENT_VERSION, queue: state.queue } },
+    ];
+
+    for (const { section, payload } of sections) {
+      const raw = JSON.stringify(payload);
+      if (lastWritten.get(section) === raw) continue; // this section didn't change
+      try {
+        await tauri.invoke("save_data_file", { name: section, value: payload });
+        lastWritten.set(section, raw);
+      } catch (err) {
+        console.warn(`[PersistenceService] Failed to save ${DATA_FILES[section]}:`, err);
+      }
+    }
+    return;
   }
 
-  return migrateState(parsed);
-}
-
-/** Serialize and write the current state to disk (atomic: tmp file + rename). */
-export async function savePersistedState(state: Omit<PersistedState, "version">): Promise<void> {
-  const payload: PersistedState = {
-    version: CURRENT_VERSION,
-    ...state,
-  };
-  const raw = JSON.stringify(payload, null, 2);
-
-  try {
-    const tauri = (window as any).__TAURI__;
-
-    // Preferred path: native Rust command (bypasses fs-plugin scope entirely)
-    if (tauri?.invoke) {
-      try {
-        await tauri.invoke("save_config", { state: payload });
-        return;
-      } catch (err) {
-        console.warn("[PersistenceService] Native save_config failed:", err);
-      }
-    }
-
-    if (!tauri?.fs?.writeTextFile) {
-      // Non-Tauri runtime (browser preview) — fall back to localStorage
-      if (!writeWebFallback(raw)) {
-        console.warn("[PersistenceService] localStorage unavailable — state not persisted.");
-      }
-      return;
-    }
-
-    const configPath = await getConfigPath();
-    if (!configPath) return;
-
-    // Ensure the appDataDir exists before trying to write to it!
-    const appDataDir = await tauri.path.appDataDir();
-    await tauri.fs.createDir(appDataDir, { recursive: true });
-
-    // Atomic write: write to a temp file, then rename over the real one.
-    // If rename isn't available, fall back to a direct write.
-    const tmpPath = `${configPath}.tmp`;
-    await tauri.fs.writeTextFile(tmpPath, raw);
-    if (tauri.fs.renameFile) {
-      try {
-        await tauri.fs.renameFile(tmpPath, configPath);
-      } catch (renameErr) {
-        console.warn("[PersistenceService] Atomic rename failed, writing directly:", renameErr);
-        await tauri.fs.writeTextFile(configPath, raw);
-        await tauri.fs.removeFile?.(tmpPath).catch?.(() => {});
-      }
-    } else {
-      await tauri.fs.writeTextFile(configPath, raw);
-    }
-  } catch (e) {
-    console.error("[PersistenceService] Failed to save state:", e);
+  // Non-Tauri runtime (browser preview): keep everything under one key.
+  const raw = JSON.stringify({ version: CURRENT_VERSION, ...state }, null, 2);
+  if (!writeWebFallback(raw)) {
+    console.warn("[PersistenceService] localStorage unavailable — state not persisted.");
   }
 }
 

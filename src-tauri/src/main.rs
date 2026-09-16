@@ -86,6 +86,74 @@ fn save_config(app: tauri::AppHandle, state: PersistedConfig) -> Result<(), Stri
     Ok(())
 }
 
+/// Sections of app state that live in their own file (split persistence).
+/// The frontend passes `name`, so an allowlist keeps a frontend bug from
+/// reading/writing an arbitrary path.
+const DATA_FILES: [&str; 3] = ["settings", "history", "queue"];
+
+fn data_file_path(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf, String> {
+    if !DATA_FILES.contains(&name) {
+        return Err(format!("unknown data file: {}", name));
+    }
+    app.path_resolver()
+        .app_data_dir()
+        .map(|d| d.join(format!("{}.json", name)))
+        .ok_or_else(|| "could not resolve app data dir".to_string())
+}
+
+/// Load one persisted section (settings.json / history.json / queue.json).
+/// Ok(None) means "not written yet" (first run) rather than an error.
+#[tauri::command]
+fn load_data_file(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let path = data_file_path(&app, &name)?;
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => {
+            // Tolerate a UTF-8 BOM (file hand-edited in Notepad).
+            let clean = raw.trim_start_matches('\u{feff}');
+            serde_json::from_str(clean)
+                .map(Some)
+                .map_err(|e| format!("{}.json parse error: {}", name, e))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("failed to read {}.json: {}", name, e)),
+    }
+}
+
+/// Atomically persist one section: write <name>.json.tmp then rename over it.
+#[tauri::command]
+fn save_data_file(
+    app: tauri::AppHandle,
+    name: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let path = data_file_path(&app, &name)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("failed to create data dir: {}", e))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let raw = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, raw).map_err(|e| format!("failed to write temp {}: {}", name, e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("failed to finalize {}: {}", name, e))?;
+    Ok(())
+}
+
+/// Retire the pre-split `config.json` once its sections exist as their own
+/// files. Renamed (not deleted) to `config.json.bak` so nothing is lost.
+#[tauri::command]
+fn archive_legacy_config(app: tauri::AppHandle) -> Result<bool, String> {
+    let path = config_path(&app)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let backup = path.with_extension("json.bak");
+    std::fs::rename(&path, &backup)
+        .map(|_| true)
+        .map_err(|e| format!("failed to archive config.json: {}", e))
+}
+
 /// Tracks live yt-dlp child processes so they can be paused/cancelled.
 pub struct DownloadProcs {
     pub children: Mutex<HashMap<String, CommandChild>>,
@@ -969,7 +1037,10 @@ fn main() {
             cancel_download,
             open_folder,
             load_config,
-            save_config
+            save_config,
+            load_data_file,
+            save_data_file,
+            archive_legacy_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running DropDL desktop application");

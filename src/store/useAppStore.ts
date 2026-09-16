@@ -155,6 +155,8 @@ interface AppStore {
   cancelTask: (id: string) => void;
   cancelAll: () => void;
   removeTask: (id: string) => void;
+  retryTask: (id: string) => void;
+  retryAll: () => void;
   clearCompleted: () => void;
   pauseAll: () => void;
   resumeAll: () => void;
@@ -590,14 +592,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
     if (batchMediaMode === "audio") {
       formatSelector = "ba/b";
       resolutionLabel = `Audio ${batchContainer} (${audioQuality === "best" ? "Best VBR" : audioQuality + " kbps"})`;
-    } else if (batchMediaMode === "video-only") {
-      if (batchQuality === "best") {
-        formatSelector = "bv*";
-        resolutionLabel = "Best Video Stream (No Audio)";
-      } else {
-        formatSelector = `bv*[height<=${batchQuality.replace("p", "")}]`;
-        resolutionLabel = `${batchQuality} Video (No Audio)`;
-      }
     } else if (batchQuality !== "best") {
       formatSelector = `bv*[height<=${batchQuality.replace("p", "")}]+ba/b`;
       resolutionLabel = `${batchQuality} + Best Audio`;
@@ -810,6 +804,43 @@ export const useAppStore = create<AppStore>((set, get) => ({
     get().persistNow();
   },
 
+  retryTask: (id) => {
+    const task = get().queue.find((t) => t.id === id);
+    if (!task) return;
+    // Never restart a task that is still alive.
+    if (["downloading", "processing", "merging", "analyzing"].includes(task.status)) return;
+    // Reset the counters for a clean progress bar; yt-dlp resumes from any
+    // existing .part file so already-downloaded data is not fetched again.
+    set((state) => ({
+      queue: state.queue.map((t) =>
+        t.id === id
+          ? { ...t, status: "queued" as const, progress: 0, speed: 0, etaSeconds: 0, postProcessingStep: undefined }
+          : t
+      ),
+    }));
+    // Start immediately (bypasses the concurrency worker so an explicit retry
+    // is never starved by other queued items).
+    get().resumeTask(id);
+    get().persistNow();
+  },
+
+  retryAll: () => {
+    const retryable = get().queue.filter(
+      (t) => t.status === "failed" || t.status === "cancelled"
+    );
+    if (retryable.length === 0) return;
+    set((state) => ({
+      queue: state.queue.map((t) =>
+        t.status === "failed" || t.status === "cancelled"
+          ? { ...t, status: "queued" as const, progress: 0, speed: 0, etaSeconds: 0, postProcessingStep: undefined }
+          : t
+      ),
+    }));
+    // Re-queue everything, then let the concurrency worker start up to N.
+    get().maybeStartNextQueued();
+    get().persistNow();
+  },
+
   pauseAll: () => {
     get().queue.forEach((t) => {
       if (t.status === "downloading") {
@@ -889,6 +920,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
       queue: saved.queue ?? [],
       hasLoadedData: true,
     }));
+    // Tasks that were still waiting in line before the app closed go back
+    // through the concurrency worker, so a restored batch keeps downloading
+    // without the user having to press Resume All.
+    get().maybeStartNextQueued();
   },
 
   persistNow: async () => {
@@ -901,15 +936,19 @@ export const useAppStore = create<AppStore>((set, get) => ({
       // Every non-terminal task is durable state. Live statuses (downloading,
       // processing, merging, analyzing) can't survive a restart, so they are
       // demoted to "paused" — the yt-dlp .part files let the user resume them
-      // (Queue → Resume All) instead of silently losing the batch.
+      // (Queue → Resume All) instead of silently losing the batch. Cancelled
+      // tasks are kept too, so "Retry All" still works after a restart.
       queue: queue
-        .filter((t) => t.status !== "completed" && t.status !== "cancelled")
+        .filter((t) => t.status !== "completed")
         .slice(0, 200)
         .map((t) => ({
           ...t,
           logs: [],
           status:
-            t.status === "queued" || t.status === "paused" || t.status === "failed"
+            t.status === "queued" ||
+            t.status === "paused" ||
+            t.status === "failed" ||
+            t.status === "cancelled"
               ? t.status
               : ("paused" as const),
         })),

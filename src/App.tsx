@@ -1,5 +1,8 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import { useAppStore } from "./store/useAppStore";
+
+/** Minimum gap between automatic queue writes (progress ticks arrive faster). */
+const QUEUE_SAVE_INTERVAL_MS = 2000;
 
 import { Sidebar } from "./components/common/Sidebar";
 import { NotificationToast } from "./components/common/NotificationToast";
@@ -17,6 +20,9 @@ import { SettingsPage } from "./components/settings/SettingsPage";
 
 export default function App() {
   const { activeNav, mediaInfo, refreshDependencies, setShowDependencyModal, loadPersistedData, persistNow, settings, history, paths, queue, hasLoadedData } = useAppStore();
+
+  /** Timestamp of the last automatic queue write (see the throttle below). */
+  const lastQueueSaveRef = useRef(0);
 
   useEffect(() => {
     // Load saved settings & history from disk on startup
@@ -51,14 +57,18 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, history, paths]);
 
-  // Debounced auto-save whenever the QUEUE changes (enqueued, started, paused,
-  // finished...). Progress ticks are coalesced by the debounce so disk writes
-  // stay cheap, but no status transition is ever lost to an app close.
+  // Throttled auto-save whenever the QUEUE changes (enqueued, started, paused,
+  // finished...). Download progress ticks arrive several times a second, so a
+  // plain debounce would be reset forever and never fire — this guarantees a
+  // write at most QUEUE_SAVE_INTERVAL_MS after a change, plus an immediate one
+  // whenever nothing has been written recently.
   useEffect(() => {
     if (!hasLoadedData) return;
+    const delay = Math.max(0, QUEUE_SAVE_INTERVAL_MS - (Date.now() - lastQueueSaveRef.current));
     const t = setTimeout(() => {
+      lastQueueSaveRef.current = Date.now();
       persistNow();
-    }, 1000);
+    }, delay);
     return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queue, hasLoadedData]);

@@ -367,19 +367,34 @@ class TauriService {
 
   cancelDownload(taskId: string): void {
     // Simulation-mode cleanup (no-op in native mode)
-    this.pauseDownload(taskId);
+    const interval = this.activeIntervals.get(taskId);
+    if (interval) {
+      window.clearInterval(interval);
+      this.activeIntervals.delete(taskId);
+    }
     const timeout = this.activeIntervals.get(taskId + "_init");
     if (timeout) {
       window.clearTimeout(timeout);
       this.activeIntervals.delete(taskId + "_init");
     }
 
-    // Native: kill the yt-dlp process
+    // Native: kill the yt-dlp process tree. NOTE: do NOT also invoke
+    // pause_download here — the two Rust commands raced each other: pause set
+    // the stop flag to "paused" and emitted a "paused" status event that could
+    // arrive after "cancelled", leaving tasks stuck as Paused after Cancel All.
     const tauri = (window as any).__TAURI__;
     if (tauri?.invoke) {
-      tauri.invoke("cancel_download", { taskId }).catch(() => {});
+      tauri
+        .invoke("cancel_download", { taskId })
+        .catch(() => {})
+        .finally(() => {
+          // Stop listening only after the Rust command has run, so the final
+          // "cancelled" status event is still received.
+          this.removeListeners(taskId);
+        });
+    } else {
+      this.removeListeners(taskId);
     }
-    this.removeListeners(taskId);
   }
 
   /**
