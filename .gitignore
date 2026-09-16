@@ -6,3 +6,23 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Rust / Cargo build output
+/src-tauri/target/
+/target/
+
+# Installers and release artifacts — attach these to a GitHub Release, never commit
+# them: they are ~140 MB each and would bloat every clone of the repository.
+*.msi
+*.msi.sig
+DropDL_*-setup.exe
+DropDL-*-portable.zip
+*.appx
+*.deb
+*.rpm
+*.AppImage
+
+# Build scratch files
+build_log.txt
+build_release_log.txt
+flat_test.json
