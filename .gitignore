@@ -21,7 +21,7 @@ DropDL-*-portable.zip
 *.deb
 *.rpm
 *.AppImage
-src-tauri/bin/
+src-tauri/bin/*
 # icpns folder
 icons/ 
 
