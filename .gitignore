@@ -22,6 +22,15 @@ DropDL-*-portable.zip
 *.rpm
 *.AppImage
 
+# Download engine binaries (yt-dlp + FFmpeg + FFprobe, ~330 MB total).
+# NEVER commit these: GitHub rejects files >100 MB on a normal push, and the
+# 408/timeout you hit was exactly this. Developers and CI download the engine
+# instead — see "Download engine" in README.md. The files stay on your disk;
+# this only stops git from tracking them.
+src-tauri/bin/*.exe
+src-tauri/bin/*.tmp
+!src-tauri/bin/.gitkeep
+
 # Build scratch files
 build_log.txt
 build_release_log.txt

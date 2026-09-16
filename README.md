@@ -113,12 +113,22 @@ queue or history. Your download queue is restored on the next launch.
   (see [Tauri prerequisites](https://tauri.app/v1/guides/getting-started/prerequisites))
 - WebView2 runtime (see above)
 
-The download engine is already in the repo at `src-tauri/bin/`:
+### Download engine
 
-```
-yt-dlp-x86_64-pc-windows-msvc.exe     17 MB
-ffmpeg-x86_64-pc-windows-msvc.exe    157 MB
-ffprobe-x86_64-pc-windows-msvc.exe   157 MB
+Source clones and CI runners fetch the engine (~330 MB total) instead of
+committing it — GitHub rejects single files over 100 MB on a normal push.
+Download, then rename **exactly** as follows in `src-tauri/bin/`:
+
+| File in `src-tauri/bin/` | Version as of v1.0.0 | Get it from |
+|---|---|---|
+| `yt-dlp-x86_64-pc-windows-msvc.exe` (17 MB) | 2026.08.19 | [yt-dlp releases](https://github.com/yt-dlp/yt-dlp/releases) → `yt-dlp.exe`, renamed |
+| `ffmpeg-x86_64-pc-windows-msvc.exe` (157 MB) | N-126537 (2026-09-13) | [gyan.dev FFmpeg builds](https://www.gyan.dev/ffmpeg/builds/) → `ffmpeg-git-full.7z` → `bin\ffmpeg.exe`, renamed |
+| `ffprobe-x86_64-pc-windows-msvc.exe` (157 MB) | N-126537 (2026-09-13) | Same archive → `bin\ffprobe.exe`, renamed |
+
+```powershell
+# from the repo root, verify the engine is in place:
+Get-ChildItem src-tauri\bin\*.exe
+.\src-tauri\bin\yt-dlp-x86_64-pc-windows-msvc.exe --version
 ```
 
 Tauri picks these up through `externalBin` in `src-tauri/tauri.conf.json` and installs them next
