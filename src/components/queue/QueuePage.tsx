@@ -78,7 +78,15 @@ export const QueuePage: React.FC = () => {
             <span>Download Queue</span>
           </h1>
           <p className="text-xs text-neutral-400 mt-0.5">
-            {activeCount} downloading • {queuedCount} queued{pausedCount > 0 ? ` • ${pausedCount} paused` : ""} • {queue.length} total tasks
+            {[
+              `${activeCount} downloading`,
+              `${queuedCount} queued`,
+              pausedCount > 0 ? `${pausedCount} paused` : null,
+              retryableCount > 0 ? `${retryableCount} retryable` : null,
+            ]
+              .filter(Boolean)
+              .join(" • ")}{" "}
+            • {queue.length} total tasks
           </p>
 
           {/* Aggregate batch progress (playlist/queue level) */}

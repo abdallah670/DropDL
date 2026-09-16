@@ -1,7 +1,3 @@
-
-> react-example@0.0.0 tauri
-> tauri build --debug
-
      Running beforeBuildCommand `npm run build`
 
 > react-example@0.0.0 build
@@ -13,9 +9,9 @@ transforming...
 rendering chunks...
 computing gzip size...
 [2mdist/[22m[32mindex.html                 [39m[1m[2m  0.92 kB[22m[1m[22m[2m │ gzip:   0.42 kB[22m
-[2mdist/[22m[35massets/index-GSeb9dye.css  [39m[1m[2m 42.74 kB[22m[1m[22m[2m │ gzip:   7.69 kB[22m
-[2mdist/[22m[36massets/index-2Cvpn8gR.js   [39m[1m[2m363.43 kB[22m[1m[22m[2m │ gzip: 100.80 kB[22m
-[32m✓ built in 10.11s[39m
+[2mdist/[22m[35massets/index-vN_HRBZw.css  [39m[1m[2m 42.93 kB[22m[1m[22m[2m │ gzip:   7.71 kB[22m
+[2mdist/[22m[36massets/index-fp9_OLtN.js   [39m[1m[2m363.99 kB[22m[1m[22m[2m │ gzip: 101.02 kB[22m
+[32m✓ built in 13.12s[39m
    Compiling dropdl v1.0.0 (F:\Meno\new\DropDL\src-tauri)
 warning: variable does not need to be mutable
    --> src\main.rs:399:9
@@ -84,13 +80,10 @@ warning: variable does not need to be mutable
     |            help: remove this `mut`
 
 warning: `dropdl` (bin "dropdl") generated 8 warnings (run `cargo fix --bin "dropdl" -p dropdl` to apply 8 suggestions)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.99s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 45.90s
         Info Target: x64
      Running candle for "main.wxs"
      Running light to produce C:\Users\HP\AppData\Local\Temp\dropdl-target\debug\bundle\msi\DropDL_1.0.0_x64_en-US.msi
-        Info Target: x64
-     Running makensis.exe to produce C:\Users\HP\AppData\Local\Temp\dropdl-target\debug\bundle\nsis\DropDL_1.0.0_x64-setup.exe
-    Finished 2 bundles at:
+    Finished 1 bundle at:
         C:\Users\HP\AppData\Local\Temp\dropdl-target\debug\bundle\msi\DropDL_1.0.0_x64_en-US.msi
-        C:\Users\HP\AppData\Local\Temp\dropdl-target\debug\bundle\nsis\DropDL_1.0.0_x64-setup.exe
 
