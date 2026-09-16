@@ -1,0 +1,6 @@
+{
+  "name": "DropDL",
+  "description": "Professional desktop GUI for yt-dlp with advanced format inspection, quality selection, queue manager, and dependency diagnostics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
