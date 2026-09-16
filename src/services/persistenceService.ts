@@ -14,10 +14,55 @@ export interface PersistedState {
   settings: AppSettings | null;
   history: DownloadTask[];
   paths: PersistedPaths;
+  /** Resumable tasks (queued/paused/failed) restored on next launch. */
+  queue: DownloadTask[];
 }
 
-const CURRENT_VERSION = 1;
+const CURRENT_VERSION = 2;
 const CONFIG_FILENAME = "config.json";
+const HISTORY_CAP = 200;
+const QUEUE_CAP = 200;
+
+/** Statuses worth keeping across restarts. Everything else is dropped. */
+const RESUMABLE_STATUSES = new Set(["queued", "paused", "failed"]);
+
+/**
+ * Migrate a parsed config of ANY previous version to the current shape.
+ * - v1 → v2: adds the persisted `queue`.
+ * - Runtime statuses (downloading/processing/merging/analyzing) can't survive a
+ *   restart, so they are demoted to "paused" (yt-dlp resumes from .part files).
+ * - logs are stripped (verbose, not durable state).
+ */
+function migrateState(parsed: any): PersistedState {
+  const rawQueue: any[] = Array.isArray(parsed.queue) ? parsed.queue : [];
+
+  const resumableQueue: DownloadTask[] = rawQueue
+    .filter((t) => t && typeof t === "object" && typeof t.id === "string" && typeof t.url === "string")
+    .filter((t) => RESUMABLE_STATUSES.has(t.status) || t.status === "downloading" || t.status === "processing" || t.status === "merging" || t.status === "analyzing")
+    .map((t) => ({
+      ...t,
+      status: RESUMABLE_STATUSES.has(t.status) ? t.status : "paused",
+      logs: [],
+      speed: 0,
+      etaSeconds: 0,
+      postProcessingStep: undefined,
+    }))
+    .slice(0, QUEUE_CAP);
+
+  return {
+    version: CURRENT_VERSION,
+    settings: parsed.settings ?? null,
+    history: Array.isArray(parsed.history) ? parsed.history.slice(0, HISTORY_CAP) : [],
+    paths: {
+      lastDownloadFolder:
+        typeof parsed.paths?.lastDownloadFolder === "string" ? parsed.paths.lastDownloadFolder : "",
+      favoriteFolders: Array.isArray(parsed.paths?.favoriteFolders)
+        ? parsed.paths.favoriteFolders.filter((f: unknown) => typeof f === "string")
+        : [],
+    },
+    queue: resumableQueue,
+  };
+}
 
 /** Resolve the AppData dir via Tauri path API */
 async function getConfigPath(): Promise<string | null> {
@@ -93,25 +138,13 @@ export async function loadPersistedState(): Promise<PersistedState | null> {
 function validateParsed(parsed: any): PersistedState | null {
   if (!parsed || typeof parsed !== "object") return null;
 
-  // Basic version check — if the schema changed, migrate instead of dropping data
   if (parsed.version !== CURRENT_VERSION) {
     console.warn(
-      `[PersistenceService] Config version ${parsed.version} != ${CURRENT_VERSION} — salvaging known fields.`
+      `[PersistenceService] Migrating config version ${parsed.version} → ${CURRENT_VERSION}.`
     );
   }
 
-  return {
-    version: CURRENT_VERSION,
-    settings: parsed.settings ?? null,
-    history: Array.isArray(parsed.history) ? parsed.history : [],
-    paths: {
-      lastDownloadFolder:
-        typeof parsed.paths?.lastDownloadFolder === "string" ? parsed.paths.lastDownloadFolder : "",
-      favoriteFolders: Array.isArray(parsed.paths?.favoriteFolders)
-        ? parsed.paths.favoriteFolders.filter((f: unknown) => typeof f === "string")
-        : [],
-    },
-  };
+  return migrateState(parsed);
 }
 
 /** Serialize and write the current state to disk (atomic: tmp file + rename). */

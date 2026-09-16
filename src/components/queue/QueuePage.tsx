@@ -27,6 +27,7 @@ export const QueuePage: React.FC = () => {
     removeTask,
     pauseAll,
     resumeAll,
+    cancelAll,
     clearCompleted,
     setActiveNav,
   } = useAppStore();
@@ -37,6 +38,30 @@ export const QueuePage: React.FC = () => {
   const queuedCount = queue.filter((t) => t.status === "queued").length;
   const pausedCount = queue.filter((t) => t.status === "paused").length;
   const completedCount = queue.filter((t) => t.status === "completed" || t.status === "cancelled").length;
+  // Anything that can still be stopped: running, queued or paused tasks.
+  const cancellableCount = queue.filter((t) =>
+    ["downloading", "queued", "paused", "processing", "merging", "analyzing"].includes(t.status)
+  ).length;
+
+  // Aggregate batch progress across all pending tasks (playlist/queue level view)
+  const pendingTasks = queue.filter((t) =>
+    ["downloading", "queued", "paused", "processing", "merging", "analyzing"].includes(t.status)
+  );
+  const aggTotal = pendingTasks.reduce((s, t) => s + (t.totalBytes > 0 ? t.totalBytes : 0), 0);
+  const aggDone = pendingTasks.reduce((s, t) => s + (t.totalBytes > 0 ? t.downloadedBytes : 0), 0);
+  const aggPct = aggTotal > 0 ? Math.min(100, Math.round((aggDone / aggTotal) * 100)) : 0;
+
+  // Reveal the finished file's containing folder (uses the safe open_folder command)
+  const openContainingFolder = async (filePath: string) => {
+    const tauri = (window as any).__TAURI__;
+    if (!tauri?.invoke) return;
+    const dir = filePath.replace(/[\\/][^\\/]+$/, "");
+    try {
+      await tauri.invoke("open_folder", { path: dir });
+    } catch {
+      /* non-fatal */
+    }
+  };
   return (
     <div id="queue-page" className="p-6 space-y-5 select-none max-w-5xl mx-auto">
       {/* Top Header & Global Actions */}
@@ -49,6 +74,25 @@ export const QueuePage: React.FC = () => {
           <p className="text-xs text-neutral-400 mt-0.5">
             {activeCount} downloading • {queuedCount} queued{pausedCount > 0 ? ` • ${pausedCount} paused` : ""} • {queue.length} total tasks
           </p>
+
+          {/* Aggregate batch progress (playlist/queue level) */}
+          {pendingTasks.length > 1 && (
+            <div className="mt-2 max-w-md">
+              <div className="flex items-center justify-between text-[10px] font-mono text-neutral-500 mb-1">
+                <span>
+                  {pendingTasks.length} tasks in batch
+                  {aggTotal > 0 ? ` • ${formatBytes(aggDone)} / ${formatBytes(aggTotal)}` : ""}
+                </span>
+                <span>{aggPct}% overall</span>
+              </div>
+              <div className="h-1 rounded-full bg-neutral-800 overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all duration-500"
+                  style={{ width: `${aggPct}%` }}
+                />
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center space-x-2">
@@ -68,6 +112,15 @@ export const QueuePage: React.FC = () => {
           >
             <Play className="w-3.5 h-3.5 text-emerald-400" />
             <span>Resume All</span>
+          </button>
+
+          <button
+            onClick={cancelAll}
+            disabled={cancellableCount === 0}
+            className="flex items-center space-x-1 px-3 py-1.5 rounded bg-red-950/60 hover:bg-red-900/60 disabled:opacity-40 text-xs font-medium text-red-300 transition-colors border border-red-900"
+          >
+            <X className="w-3.5 h-3.5" />
+            <span>Cancel All</span>
           </button>
 
           <button
@@ -249,6 +302,16 @@ export const QueuePage: React.FC = () => {
                         title="Resume download"
                       >
                         <Play className="w-4 h-4 text-emerald-400" />
+                      </button>
+                    )}
+
+                    {isCompleted && task.filePath && (
+                      <button
+                        onClick={() => openContainingFolder(task.filePath!)}
+                        className="p-1.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 transition-colors"
+                        title="Show in folder"
+                      >
+                        <Folder className="w-4 h-4 text-sky-400" />
                       </button>
                     )}
 

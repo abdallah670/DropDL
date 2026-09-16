@@ -91,7 +91,6 @@ interface AppStore {
 
   // Playlist Mode
   playlist: PlaylistInfo | null;
-  playlistInfo: PlaylistInfo | null;
   selectedPlaylistIndices: number[];
   setPlaylist: (p: PlaylistInfo | null) => void;
   togglePlaylistVideo: (id: string) => void;
@@ -145,10 +144,16 @@ interface AppStore {
   // Core Actions
   analyzeUrl: (urlToAnalyze?: string) => Promise<void>;
   enqueueCurrentDownload: () => void;
-  enqueuePlaylistItems: () => void;
+  enqueuePlaylistItems: (overrides?: {
+    mediaMode?: "video" | "audio";
+    quality?: string; // "best" | "1080p" | "720p" | "480p" (video) or "best" | "320" | "128" (audio)
+    container?: string; // mp4 | webm | mkv (video) or mp3 | m4a | opus (audio)
+    numberedPrefix?: boolean; // prefix filenames with the playlist index
+  }) => void;
   pauseTask: (id: string) => void;
   resumeTask: (id: string) => void;
   cancelTask: (id: string) => void;
+  cancelAll: () => void;
   removeTask: (id: string) => void;
   clearCompleted: () => void;
   pauseAll: () => void;
@@ -265,9 +270,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set((state) => ({ metadataConfig: { ...state.metadataConfig, ...partial } })),
 
   playlist: null,
-  get playlistInfo() {
-    return get().playlist;
-  },
   selectedPlaylistIndices: [],
   setPlaylist: (p) => set({ playlist: p }),
   togglePlaylistVideo: (id) =>
@@ -545,16 +547,19 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
     get().showNotification("Download Queued", `"${mediaInfo.title.substring(0, 38)}..." added to queue`);
     get().addLog("info", `Queued download task: ${newTask.title}`);
+    // Durably persist the new queued task (crash/restart safe)
+    get().persistNow();
 
     // Respect the concurrentDownloads limit: only start if there's a free slot,
     // otherwise the task waits in the queue until another finishes.
     get().maybeStartNextQueued();
   },
 
-  enqueuePlaylistItems: () => {
+  enqueuePlaylistItems: (overrides) => {
     const {
       playlist,
       settings,
+      selectedPlaylistIndices,
       mediaMode,
       simpleQuality,
       audioQuality,
@@ -563,30 +568,43 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } = get();
     if (!playlist) return;
 
-    const selectedEntries = playlist.entries.filter((e) => e.selected);
+    // The UI (checkboxes / Select All / range input) tracks the selection in
+    // selectedPlaylistIndices — entry.selected is a legacy flag the toggles
+    // never write, so filtering on it used to enqueue EVERY video regardless
+    // of what the user picked.
+    const selectedSet = new Set(selectedPlaylistIndices);
+    const selectedEntries = playlist.entries.filter((e) => selectedSet.has(e.index));
     if (selectedEntries.length === 0) return;
+
+    // Batch options chosen on the Playlist page take priority; fall back to
+    // the current Download page selection otherwise.
+    const batchMediaMode = overrides?.mediaMode ?? (mediaMode === "audio-only" ? "audio" : "video");
+    const batchQuality = overrides?.quality ?? simpleQuality;
+    const batchContainer = overrides?.container ?? (batchMediaMode === "audio" ? audioExtractionFormat : outputContainer);
 
     // Playlist items inherit the current format selection; otherwise the
     // container / audio-format choice would be ignored for batch downloads.
-    const mediaType: "video" | "audio" = mediaMode === "audio-only" ? "audio" : "video";
+    const mediaType: "video" | "audio" = batchMediaMode === "audio" ? "audio" : "video";
     let formatSelector = "bv*+ba/b";
     let resolutionLabel = "Best Video + Audio";
-    if (mediaMode === "audio-only") {
+    if (batchMediaMode === "audio") {
       formatSelector = "ba/b";
-      resolutionLabel = `Audio ${audioExtractionFormat} (${audioQuality === "best" ? "Best VBR" : audioQuality + " kbps"})`;
-    } else if (mediaMode === "video-only") {
-      if (simpleQuality === "best") {
+      resolutionLabel = `Audio ${batchContainer} (${audioQuality === "best" ? "Best VBR" : audioQuality + " kbps"})`;
+    } else if (batchMediaMode === "video-only") {
+      if (batchQuality === "best") {
         formatSelector = "bv*";
         resolutionLabel = "Best Video Stream (No Audio)";
       } else {
-        formatSelector = `bv*[height<=${simpleQuality.replace("p", "")}]`;
-        resolutionLabel = `${simpleQuality} Video (No Audio)`;
+        formatSelector = `bv*[height<=${batchQuality.replace("p", "")}]`;
+        resolutionLabel = `${batchQuality} Video (No Audio)`;
       }
-    } else if (simpleQuality !== "best") {
-      formatSelector = `bv*[height<=${simpleQuality.replace("p", "")}]+ba/b`;
-      resolutionLabel = `${simpleQuality} + Best Audio`;
+    } else if (batchQuality !== "best") {
+      formatSelector = `bv*[height<=${batchQuality.replace("p", "")}]+ba/b`;
+      resolutionLabel = `${batchQuality} + Best Audio`;
     }
-    const container = mediaMode === "audio-only" ? audioExtractionFormat : outputContainer;
+    const container = batchContainer;
+
+    const numberedPrefix = overrides?.numberedPrefix ?? false;
 
     const newTasks: DownloadTask[] = selectedEntries.map((entry, idx) => ({
       id: "pl-task-" + Date.now() + "-" + idx,
@@ -597,11 +615,25 @@ export const useAppStore = create<AppStore>((set, get) => ({
       resolutionLabel,
       formatSelector,
       container,
-      destinationPath: `${settings.downloads.defaultFolder}/${playlist.title.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
+      // Optional numbered filenames (01 - Title.mp4) using the playlist index.
+      // The template is relative so the -P destination folder still applies.
+      ...(numberedPrefix
+        ? { outputTemplate: `${String(entry.index).padStart(2, "0")} - %(title)s.%(ext)s` }
+        : {}),
+      // Sanitize for a valid folder name while PRESERVING non-Latin scripts
+      // (Arabic, Chinese, ...): only strip characters Windows forbids in
+      // filenames, not every non-ASCII character.
+      destinationPath: `${settings.downloads.defaultFolder}/${playlist.title
+        .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+        .replace(/^\.+/, "")
+        .trim()
+        .slice(0, 100) || "Playlist"}`,
       status: "queued",
       progress: 0,
       downloadedBytes: 0,
-      totalBytes: 75000000,
+      // Unknown until yt-dlp reports it; a fake 75 MB placeholder would show
+      // bogus sizes in the queue UI.
+      totalBytes: 0,
       speed: 0,
       etaSeconds: 0,
       logs: [`[${new Date().toLocaleTimeString()}] Playlist item added to batch`],
@@ -618,6 +650,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     // Auto start respecting concurrency limit
     if (newTasks.length > 0) {
       get().maybeStartNextQueued();
+      // Durably persist the batch (crash/restart safe)
+      get().persistNow();
     }
   },
 
@@ -629,6 +663,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         t.id === id ? { ...t, status: "paused", speed: 0, etaSeconds: 0, postProcessingStep: undefined } : t
       ),
     }));
+    // Persist the paused state so the task survives an app restart
+    get().persistNow();
   },
 
   maybeStartNextQueued: () => {
@@ -681,27 +717,35 @@ export const useAppStore = create<AppStore>((set, get) => ({
         }));
         get().addLog("stdout", logLine, id);
       },
-      () => {
+      (final) => {
+        // Merge the final probed size / file path from the completion payload
+        // (the Rust side probes the finished file with ffprobe before emitting
+        // download-complete) so completed tasks show real bytes, not 0 B.
+        const finalUpdate: Partial<DownloadTask> = { status: "completed" as const, progress: 100 };
+        if (typeof final?.downloadedBytes === "number" && final.downloadedBytes > 0) {
+          finalUpdate.downloadedBytes = final.downloadedBytes;
+        }
+        if (typeof final?.totalBytes === "number" && final.totalBytes > 0) {
+          finalUpdate.totalBytes = final.totalBytes;
+        }
+        if (final?.filePath) {
+          finalUpdate.filePath = final.filePath;
+        }
         const completedTask = get().queue.find((t) => t.id === id);
         if (completedTask) {
           get().showNotification("Download Complete", `"${completedTask.title}" is ready.`);
+          const finalTask: DownloadTask = {
+            ...completedTask,
+            ...finalUpdate,
+            status: "completed",
+            progress: 100,
+            completedAt: Date.now(),
+          };
           set((state) => ({
-            queue: state.queue.map((t) =>
-              t.id === id
-                ? { ...t, status: "completed" as const, progress: 100, completedAt: Date.now() }
-                : t
-            ),
+            queue: state.queue.map((t) => (t.id === id ? finalTask : t)),
             history: state.history.some((h) => h.id === id)
               ? state.history
-              : [
-                  {
-                    ...completedTask,
-                    status: "completed" as const,
-                    progress: 100,
-                    completedAt: Date.now(),
-                  },
-                  ...state.history,
-                ],
+              : [finalTask, ...state.history],
           }));
         }
         // A slot freed up — start the next queued task
@@ -735,12 +779,35 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set((state) => ({
       queue: state.queue.filter((t) => t.id !== id),
     }));
+    get().persistNow();
   },
 
   clearCompleted: () => {
     set((state) => ({
       queue: state.queue.filter((t) => t.status !== "completed" && t.status !== "cancelled"),
     }));
+  },
+
+  cancelAll: () => {
+    // Cancel every active download (kills its yt-dlp process) and every
+    // still-queued task in one go.
+    get().queue.forEach((t) => {
+      if (t.status !== "completed" && t.status !== "cancelled" && t.status !== "failed") {
+        if (t.status !== "queued") {
+          tauriService.cancelDownload(t.id);
+        }
+      }
+    });
+    set((state) => ({
+      queue: state.queue.map((t) =>
+        t.status !== "completed" && t.status !== "cancelled" && t.status !== "failed"
+          ? { ...t, status: "cancelled" as const, speed: 0, etaSeconds: 0, postProcessingStep: undefined }
+          : t
+      ),
+    }));
+    // Free any concurrency slots the worker thinks are occupied.
+    get().maybeStartNextQueued();
+    get().persistNow();
   },
 
   pauseAll: () => {
@@ -786,11 +853,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
         ytdlp: {
           ...state.settings.ytdlp,
           detectedVersion: ytDlpStatus?.version || "Not detected",
+          // Write back what was actually probed so settings never show a
+          // version with a blank path / stale lastChecked again.
+          executablePath: ytDlpStatus?.installed ? ytDlpStatus.path || "" : "",
+          lastChecked: new Date().toISOString(),
         },
         ffmpeg: {
           ...state.settings.ffmpeg,
           isAvailable: ffmpegStatus?.installed || false,
           detectedVersion: ffmpegStatus?.version || "Not found",
+          ffmpegPath: ffmpegStatus?.installed ? ffmpegStatus.path || "" : "",
+          // ffprobe ships in the same sidecar bundle as ffmpeg
+          ffprobePath: ffmpegStatus?.installed ? ffmpegStatus.path || "" : "",
         },
       },
     }));
@@ -810,17 +884,35 @@ export const useAppStore = create<AppStore>((set, get) => ({
       settings: saved.settings ?? state.settings,
       history: saved.history ?? [],
       paths: saved.paths ?? DEFAULT_PATHS,
+      // Restore the persisted queue. Live statuses were demoted to "paused" by
+      // the migration, so the user can resume them (yt-dlp keeps .part files).
+      queue: saved.queue ?? [],
       hasLoadedData: true,
     }));
   },
 
   persistNow: async () => {
-    const { settings, history, paths, hasLoadedData } = get();
+    const { settings, history, paths, queue, hasLoadedData } = get();
     if (!hasLoadedData) return; // Prevent overwriting on startup
     await savePersistedState({
       settings,
       history: history.slice(0, 200).map((h) => ({ ...h, logs: [] })), // cap at 200, strip logs
       paths,
+      // Every non-terminal task is durable state. Live statuses (downloading,
+      // processing, merging, analyzing) can't survive a restart, so they are
+      // demoted to "paused" — the yt-dlp .part files let the user resume them
+      // (Queue → Resume All) instead of silently losing the batch.
+      queue: queue
+        .filter((t) => t.status !== "completed" && t.status !== "cancelled")
+        .slice(0, 200)
+        .map((t) => ({
+          ...t,
+          logs: [],
+          status:
+            t.status === "queued" || t.status === "paused" || t.status === "failed"
+              ? t.status
+              : ("paused" as const),
+        })),
     });
   },
 }));

@@ -275,13 +275,13 @@ class TauriService {
   /**
    * Executes download via native Tauri backend or runs simulation in browser
    */
-  startDownload(
+  async startDownload(
     task: DownloadTask,
     onProgress: (updated: Partial<DownloadTask>) => void,
     onLog: (logText: string) => void,
-    onComplete: () => void,
+    onComplete: (final?: { downloadedBytes?: number; totalBytes?: number; filePath?: string }) => void,
     onError: (err: string) => void
-  ): void {
+  ): Promise<void> {
     if (this.isNativeApp() && (window as any).__TAURI__) {
       const tauri = (window as any).__TAURI__;
       onLog(`[${new Date().toLocaleTimeString()}] [yt-dlp native] Starting native subprocess for ${task.url}`);
@@ -294,39 +294,49 @@ class TauriService {
             try { fn(); } catch { /* already gone */ }
           });
         }
-        const unlisteners: Array<() => void> = [];
-        const track = (fn: any) => unlisteners.push(fn);
 
-        // Progress events: { status, progress, downloadedBytes, totalBytes, speed, etaSeconds, postProcessingStep }
-        track(tauri.event.listen(`download-progress-${task.id}`, (e: any) => {
-          if (!e.payload) return;
-          const p = e.payload;
-          const update: Partial<DownloadTask> = {};
-          if (p.status !== undefined)             update.status = p.status;
-          if (p.progress !== undefined)           update.progress = Math.min(100, Math.round(p.progress * 10) / 10);
-          if (p.downloadedBytes !== undefined)    update.downloadedBytes = p.downloadedBytes;
-          if (p.totalBytes !== undefined && p.totalBytes > 0) update.totalBytes = p.totalBytes;
-          if (p.fileSizeBytes !== undefined)      update.fileSizeBytes = p.fileSizeBytes;
-          if (p.speed !== undefined)              update.speed = p.speed;
-          if (p.etaSeconds !== undefined)         update.etaSeconds = p.etaSeconds;
-          if (p.postProcessingStep !== undefined) update.postProcessingStep = p.postProcessingStep;
-          onProgress(update);
-        }));
-        track(tauri.event.listen(`download-log-${task.id}`, (e: any) => {
-          if (e.payload) onLog(e.payload);
-        }));
-        this.activeUnlisteners.set(task.id, unlisteners);
-      }
-
-      // Real completion is signaled by the Rust backend when yt-dlp terminates,
-      // NOT when start_download returns (it returns immediately after spawning).
-      if (tauri.event && tauri.event.listen) {
-        tauri.event.listen(`download-complete-${task.id}`, (e: any) => {
-          this.removeListeners(task.id);
-          const ok = e?.payload?.ok !== false;
-          if (ok) onComplete();
-          else onError(e?.payload?.message || "Download process failed");
-        });
+        // IMPORTANT: await listener registration BEFORE spawning yt-dlp.
+        // Tauri's listen() is async (it registers the callback with the Rust
+        // event system); invoking start_download first meant early progress
+        // events — and under load even the final size event — were emitted
+        // before any listener existed, so tasks showed 100% / 0 B downloaded.
+        const [unlistenProgress, unlistenLog, unlistenComplete] = await Promise.all([
+          tauri.event.listen(`download-progress-${task.id}`, (e: any) => {
+            if (!e.payload) return;
+            const p = e.payload;
+            const update: Partial<DownloadTask> = {};
+            if (p.status !== undefined)             update.status = p.status;
+            if (p.progress !== undefined)           update.progress = Math.min(100, Math.round(p.progress * 10) / 10);
+            if (p.downloadedBytes !== undefined)    update.downloadedBytes = p.downloadedBytes;
+            if (p.totalBytes !== undefined && p.totalBytes > 0) update.totalBytes = p.totalBytes;
+            if (p.fileSizeBytes !== undefined)      update.fileSizeBytes = p.fileSizeBytes;
+            if (p.filePath !== undefined)           update.filePath = p.filePath;
+            if (p.speed !== undefined)              update.speed = p.speed;
+            if (p.etaSeconds !== undefined)         update.etaSeconds = p.etaSeconds;
+            if (p.postProcessingStep !== undefined) update.postProcessingStep = p.postProcessingStep;
+            onProgress(update);
+          }),
+          tauri.event.listen(`download-log-${task.id}`, (e: any) => {
+            if (e.payload) onLog(e.payload);
+          }),
+          // Real completion is signaled by the Rust backend when yt-dlp
+          // terminates, NOT when start_download returns (it returns immediately
+          // after spawning). The payload carries the probed final size/path.
+          tauri.event.listen(`download-complete-${task.id}`, (e: any) => {
+            this.removeListeners(task.id);
+            const ok = e?.payload?.ok !== false;
+            if (ok) {
+              onComplete({
+                downloadedBytes: e?.payload?.downloadedBytes,
+                totalBytes: e?.payload?.totalBytes ?? e?.payload?.fileSizeBytes,
+                filePath: e?.payload?.filePath,
+              });
+            } else {
+              onError(e?.payload?.message || "Download process failed");
+            }
+          }),
+        ]);
+        this.activeUnlisteners.set(task.id, [unlistenProgress, unlistenLog, unlistenComplete]);
       }
 
       tauri.invoke("start_download", { task })

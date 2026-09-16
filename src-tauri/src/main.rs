@@ -41,6 +41,10 @@ pub struct PersistedConfig {
     pub history: serde_json::Value,
     #[serde(default)]
     pub paths: serde_json::Value,
+    // Persisted download queue (queued/paused/failed tasks only). Option + default
+    // keeps config.json v1 files loadable before the frontend migrates them.
+    #[serde(default)]
+    pub queue: Option<serde_json::Value>,
 }
 
 fn config_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -89,6 +93,30 @@ pub struct DownloadProcs {
     pub stops: Mutex<HashMap<String, String>>,
 }
 
+/// Kill a spawned sidecar process AND its whole child tree (ffmpeg workers,
+/// parallel connection helpers). A bare `CommandChild::kill()` only signals the
+/// direct child, so on Windows ffmpeg/merger children survived "cancel" and
+/// the download visibly kept running.
+fn kill_process_tree(child: CommandChild) {
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        use std::os::windows::process::CommandExt;
+        // Grab the PID before `kill` consumes the child.
+        let pid = child.pid();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        // Belt and braces if taskkill is unavailable / failed.
+        let _ = child.kill();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = child.kill();
+    }
+}
+
 /// Pause a running download: kill the yt-dlp process (partial .part file is kept
 /// and yt-dlp will resume from it on the next run of the same format/url).
 #[tauri::command]
@@ -105,7 +133,7 @@ fn pause_download(
         .unwrap()
         .insert(task_id.clone(), "paused".to_string());
     if let Some(mut child) = state.children.lock().unwrap().remove(&task_id) {
-        let _ = child.kill();
+        kill_process_tree(child);
     }
     let _ = app_handle.emit_all(
         &format!("download-progress-{}", task_id),
@@ -132,7 +160,7 @@ fn cancel_download(
         .unwrap()
         .insert(task_id.clone(), "cancelled".to_string());
     if let Some(mut child) = state.children.lock().unwrap().remove(&task_id) {
-        let _ = child.kill();
+        kill_process_tree(child);
     }
     let _ = app_handle.emit_all(
         &format!("download-progress-{}", task_id),
@@ -322,6 +350,83 @@ async fn probe_file_size(path: &str) -> Option<u64> {
 #[tauri::command]
 async fn analyze_url(url: String) -> Result<serde_json::Value, String> {
     validate_url(&url)?;
+    let mut cmd = Command::new_sidecar("yt-dlp")
+        .map_err(|e| format!("Failed to create sidecar: {}", e))?;
+
+    // FAST PATH: try a flat playlist extraction first. --flat-playlist only
+    // fetches the playlist manifest (titles + URLs) without requesting full
+    // metadata for every video, which turns minutes of analysis into seconds.
+    let flat_output = cmd
+        .args(&[
+            "--flat-playlist",
+            "--dump-single-json",
+            "--no-warnings",
+            "--",
+            url.trim(),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
+
+    if flat_output.status.success() {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&flat_output.stdout) {
+            if parsed.get("_type").and_then(|t| t.as_str()) == Some("playlist") {
+                let mut entries: Vec<serde_json::Value> = Vec::new();
+                let mut has_url = false;
+                if let Some(list) = parsed.get("entries").and_then(|e| e.as_array()) {
+                    for (i, e) in list.iter().enumerate() {
+                        let entry_url = e
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default();
+                        if !entry_url.is_empty() {
+                            has_url = true;
+                        }
+                        let full_url = if entry_url.starts_with("http") {
+                            entry_url
+                        } else {
+                            // Flat extraction can return bare IDs for YouTube
+                            format!("https://www.youtube.com/watch?v={}", entry_url)
+                        };
+                        entries.push(serde_json::json!({
+                            "id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                            "index": i + 1,
+                            "title": e.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled"),
+                            "duration": e.get("duration").and_then(|v| v.as_f64()),
+                            "url": full_url,
+                            "thumbnail": e.get("thumbnails")
+                                .and_then(|t| t.as_array())
+                                .and_then(|a| a.last())
+                                .and_then(|t| t.get("url"))
+                                .and_then(|u| u.as_str()),
+                            "uploader": e.get("uploader").and_then(|v| v.as_str()),
+                            "isAvailable": true,
+                            "selected": true,
+                        }));
+                    }
+                }
+                let video_count = entries.len();
+                // Return the playlist when we got usable entries. If the flat
+                // manifest came back empty/no-URL (e.g. lazy extractor response),
+                // fall through to the full extraction below so a real playlist is
+                // not reported as empty by mistake.
+                if has_url {
+                    return Ok(serde_json::json!({
+                        "playlist": {
+                            "id": parsed.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                            "title": parsed.get("title").and_then(|v| v.as_str()).unwrap_or("Playlist"),
+                            "uploader": parsed.get("uploader").or_else(|| parsed.get("channel"))
+                                .and_then(|v| v.as_str()),
+                            "video_count": video_count,
+                            "entries": entries,
+                        }
+                    }));
+                }
+            }
+        }
+    }
+
+    // SLOW PATH: single media item — full metadata including all formats.
     let mut cmd = Command::new_sidecar("yt-dlp")
         .map_err(|e| format!("Failed to create sidecar: {}", e))?;
 
@@ -554,6 +659,15 @@ async fn start_download(
                 "-P".to_string(),
                 dest_path.clone(),
             ];
+            // Optional per-task output filename template (e.g. numbered
+            // playlist batches: "01 - %(title)s.%(ext)s"). Relative template
+            // so the -P destination folder above still applies.
+            if let Some(tpl) = task["outputTemplate"].as_str() {
+                if !tpl.is_empty() && !tpl.contains("..") && !tpl.contains('/') && !tpl.contains('\\') {
+                    all_args.push("-o".to_string());
+                    all_args.push(tpl.to_string());
+                }
+            }
             all_args.extend(container_args);
             all_args.extend([
                 "--newline".to_string(),
@@ -566,9 +680,20 @@ async fn start_download(
             match spawn_result {
                 Ok((mut rx, child)) => {
                     // Register the live process so pause/cancel can kill it
-                    {
-                        let state = app_handle.state::<DownloadProcs>();
-                        state.children.lock().unwrap().insert(task_id.clone(), child);
+                    let manager = app_handle.state::<DownloadProcs>();
+                    manager.children.lock().unwrap().insert(task_id.clone(), child);
+                    // A pause/cancel request may have arrived BEFORE the child
+                    // was registered here (spawn takes a moment). If so, kill
+                    // it immediately instead of letting the download continue.
+                    let stop_now = manager.stops.lock().unwrap().get(&task_id).cloned();
+                    if let Some(kind) = stop_now {
+                        if let Some(c) = manager.children.lock().unwrap().remove(&task_id) {
+                            kill_process_tree(c);
+                        }
+                        let _ = app_handle.emit_all(
+                            &format!("download-progress-{}", task_id),
+                            serde_json::json!({ "status": kind, "speed": 0, "etaSeconds": 0 }),
+                        );
                     }
                     while let Some(event) = rx.recv().await {
                         match event {
@@ -736,6 +861,7 @@ async fn start_download(
                                             // The merger line contains a bare filename, so
                                             // resolve it against the destination folder.
                                             let mut final_size: Option<u64> = None;
+                                            let mut final_path: Option<String> = None;
                                             if let Some(file) = &output_file {
                                                 let probe_path = if file.contains('/') || file.contains('\\') {
                                                     file.clone()
@@ -747,6 +873,7 @@ async fn start_download(
                                                         file
                                                     )
                                                 };
+                                                final_path = Some(probe_path.clone());
                                                 final_size = probe_file_size(&probe_path).await;
                                             }
                                             // Fallback chain: probed size > last reported stream size
@@ -768,13 +895,23 @@ async fn start_download(
                                             if let Some(d) = final_size {
                                                 completed["downloadedBytes"] = serde_json::json!(d);
                                             }
+                                            // Absolute path of the finished file so the UI can
+                                            // offer "Show in folder" / (later, mobile share).
+                                            if let Some(fp) = final_path {
+                                                completed["filePath"] = serde_json::json!(fp);
+                                            }
                                             let _ = app_handle.emit_all(
                                                 &format!("download-progress-{}", task_id),
-                                                completed,
+                                                completed.clone(),
                                             );
+                                            // The complete payload carries the final data too, so the
+                                            // frontend can fix up bytes/path even if it missed the
+                                            // progress events above.
+                                            let mut complete = completed.clone();
+                                            complete["ok"] = serde_json::json!(true);
                                             let _ = app_handle.emit_all(
                                                 &format!("download-complete-{}", task_id),
-                                                serde_json::json!({ "ok": true }),
+                                                complete,
                                             );
                                         } else {
                                             let _ = app_handle.emit_all(

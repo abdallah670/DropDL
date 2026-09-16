@@ -16,13 +16,24 @@ import { LogViewerPage } from "./components/logs/LogViewerPage";
 import { SettingsPage } from "./components/settings/SettingsPage";
 
 export default function App() {
-  const { activeNav, mediaInfo, refreshDependencies, setShowDependencyModal, loadPersistedData, persistNow, settings, history, paths } = useAppStore();
+  const { activeNav, mediaInfo, refreshDependencies, setShowDependencyModal, loadPersistedData, persistNow, settings, history, paths, queue, hasLoadedData } = useAppStore();
 
   useEffect(() => {
     // Load saved settings & history from disk on startup
     loadPersistedData();
 
-    // Then check dependencies
+    // Last-chance save when the window closes: persist queued/paused/active
+    // tasks so nothing in the batch is lost between sessions.
+    const onBeforeUnload = () => {
+      useAppStore.getState().persistNow();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Check yt-dlp / ffmpeg dependencies after startup
+  useEffect(() => {
     refreshDependencies().then(() => {
       // Read fresh state — the `dependencies` variable captured here is stale
       const fresh = useAppStore.getState().dependencies;
@@ -39,6 +50,18 @@ export default function App() {
     persistNow();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, history, paths]);
+
+  // Debounced auto-save whenever the QUEUE changes (enqueued, started, paused,
+  // finished...). Progress ticks are coalesced by the debounce so disk writes
+  // stay cheap, but no status transition is ever lost to an app close.
+  useEffect(() => {
+    if (!hasLoadedData) return;
+    const t = setTimeout(() => {
+      persistNow();
+    }, 1000);
+    return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queue, hasLoadedData]);
 
   return (
     <div

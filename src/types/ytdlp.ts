@@ -106,6 +106,9 @@ export interface DownloadTask {
   formatSelector: string;
   container: string;
   destinationPath: string;
+  // Optional yt-dlp output filename template (relative to destinationPath),
+  // e.g. "01 - %(title)s.%(ext)s" for numbered playlist batches.
+  outputTemplate?: string;
   status: DownloadStatus;
   progress: number; // 0 to 100
   downloadedBytes: number;
@@ -121,6 +124,8 @@ export interface DownloadTask {
   createdAt: number;
   completedAt?: number;
   fileSizeBytes?: number;
+  /** Absolute path of the finished output file (set on completion). */
+  filePath?: string;
 }
 
 export type NavTab = "download" | "formats" | "queue" | "history" | "playlist" | "settings" | "logs";
@@ -143,6 +148,10 @@ export interface AppSettings {
     rateLimitKbps: number | null; // null or 0 for unlimited
     overwriteBehavior: "overwrite" | "auto-rename" | "skip" | "resume";
     overwriteMode?: "overwrite" | "auto-rename" | "skip" | "resume";
+    /** Container preselected for new downloads ("MP4" | "MKV" | "WebM" | "Original"). */
+    defaultContainer?: string;
+    /** Audio codec preselected for audio-only downloads (lowercase: "mp3" | "m4a" | ...). */
+    defaultAudioFormat?: string;
   };
   ytdlp: {
     executablePath: string;
