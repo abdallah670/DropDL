@@ -21,6 +21,9 @@ DropDL-*-portable.zip
 *.deb
 *.rpm
 *.AppImage
+src-tauri/bin/
+# icpns folder
+icons/ 
 
 # Download engine binaries (yt-dlp + FFmpeg + FFprobe, ~330 MB total).
 # NEVER commit these: GitHub rejects files >100 MB on a normal push, and the
