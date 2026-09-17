@@ -248,12 +248,12 @@ export const SettingsPage: React.FC = () => {
                   Concurrent Downloads Limit:
                 </label>
                 <select
-                  value={settings.downloads.maxConcurrent}
+                  value={settings.downloads.concurrentDownloads}
                   onChange={(e) =>
                     updateSettings({
                       downloads: {
                         ...settings.downloads,
-                        maxConcurrent: parseInt(e.target.value, 10),
+                        concurrentDownloads: parseInt(e.target.value, 10),
                       },
                     })
                   }
@@ -441,6 +441,8 @@ export const SettingsPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {activeTab === "engine" && <EngineTab />}
 
       {/* About & Privacy (local-first statement + legal responsibility) */}
       {activeTab === "about" && (

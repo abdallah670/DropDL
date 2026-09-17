@@ -364,25 +364,6 @@ export const QueuePage: React.FC = () => {
                       </button>
                     )}
 
-                    {(task.status === "queued" || task.status === "paused") && (
-                      <div className="flex flex-col">
-                        <button
-                          onClick={() => moveTaskUp(task.id)}
-                          className="p-0.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
-                          title="Move up in queue"
-                        >
-                          <ChevronUp className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          onClick={() => moveTaskDown(task.id)}
-                          className="p-0.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
-                          title="Move down in queue"
-                        >
-                          <ChevronDown className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    )}
-
                     {(task.status === "failed" || task.status === "cancelled") && (
                       <button
                         onClick={() => retryTask(task.id)}
@@ -401,44 +382,6 @@ export const QueuePage: React.FC = () => {
                       >
                         <Folder className="w-4 h-4 text-sky-400" />
                       </button>
-                    )}
-
-                    {(task.status === "queued" || task.status === "paused") && (
-                      <>
-                        <button
-                          onClick={() => moveTaskUp(task.id)}
-                          className="p-1.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
-                          title="Move up in queue"
-                        >
-                          <ChevronUp className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => moveTaskDown(task.id)}
-                          className="p-1.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
-                          title="Move down in queue"
-                        >
-                          <ChevronDown className="w-4 h-4" />
-                        </button>
-                      </>
-                    )}
-
-                    {task.status === "queued" && (
-                      <>
-                        <button
-                          onClick={() => moveTaskUp(task.id)}
-                          className="p-1.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
-                          title="Move up in queue"
-                        >
-                          <ChevronUp className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => moveTaskDown(task.id)}
-                          className="p-1.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
-                          title="Move down in queue"
-                        >
-                          <ChevronDown className="w-4 h-4" />
-                        </button>
-                      </>
                     )}
 
                     <button
