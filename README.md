@@ -51,10 +51,20 @@ need to edit your `PATH`.
 
 ### Download
 - Paste a video or playlist URL and get metadata, thumbnail, uploader, duration and view count.
-- **Quality presets** — best available, 1080p, 720p, 480p.
-- **Audio-only mode** — MP3, M4A, Opus, FLAC or WAV (via FFmpeg).
+- **Quality presets** — best available, 2160p, 1440p, 1080p, 720p, 480p — or pick exact streams in
+  the advanced format explorer.
+- **Audio-only mode** — MP3, M4A, Opus, FLAC or WAV (via FFmpeg), with bitrate/quality choice
+  (Best VBR, 320, 256, 192, 128 kbps).
 - **Container choice** — MP4, WebM or MKV, with an optional "index prefixes" mode that names
   playlist files `01 - Title.mp4`, `02 - …`.
+- **Filename presets** — Title, Title + Uploader, Uploader + Title, Title + Date, Playlist № + Title,
+  or an advanced custom yt-dlp output template with live preview. Windows-invalid characters are
+  stripped automatically and path traversal is rejected.
+- **Subtitles** — manual and/or automatic (generated) subtitles, chosen languages or all available,
+  SRT/VTT/ASS formats, embed into the video or save as separate files. Embedding is not supported
+  for WebM; DropDL warns you instead of failing silently.
+- **Metadata & thumbnails** — embed metadata, embed/download thumbnail, write description,
+  info JSON, comments and chapters (yt-dlp/FFmpeg do the work, nothing is re-implemented).
 - Live progress with percentage, downloaded/total bytes, speed and ETA.
 
 ### Playlists
@@ -67,7 +77,8 @@ need to edit your `PATH`.
 
 ### Queue
 - Configurable **concurrent downloads**; the rest wait their turn.
-- Pause / resume individual tasks, cancel a task, **Cancel All**, **Retry** one, **Retry All**.
+- Pause / resume individual tasks, cancel a task, **Cancel All**, **Retry** one, **Retry All**,
+  **Retry Failed**, reorder the queue (move up/down), and clear completed.
 - Cancelling kills the whole process tree (`yt-dlp` **and** its `ffmpeg` children), so downloads
   really stop.
 - Completed tasks show the real file size and a **Show in folder** action (final size is verified
@@ -76,10 +87,22 @@ need to edit your `PATH`.
   *Resume* and yt-dlp continues from the existing `.part` files instead of re-downloading.
 
 ### History, logs and settings
-- **History** of finished downloads with size, time and destination path.
+- **History** of finished downloads with size, time and destination path, plus **Open file**,
+  **Copy URL**, **Download again**, **Show in folder** and per-item removal. History never stores
+  cookies or credentials.
+- Friendly **error categories** — invalid URL, video unavailable, private/age-restricted,
+  authentication required, geo-restriction, rate limited, network failure, FFmpeg failure and more —
+  each explaining what happened, why, and what to try. The raw yt-dlp output stays available in the
+  per-task log view.
 - **Logs** page with per-task yt-dlp output for troubleshooting.
 - **Settings** for theme, language, notifications, clipboard monitoring, default folder,
   concurrency, retries, overwrite behaviour, default container/audio format, and binary paths.
+- **Network & Auth** — proxy (http/https/socks4/socks5, validated), download speed limit
+  (Unlimited / KB/s / MB/s), cookies from a browser profile or a Netscape cookies.txt file.
+  Cookies stay on your disk and are never uploaded or logged.
+- **Settings → Engine** shows the bundled yt-dlp/FFmpeg versions, checks for yt-dlp updates and can
+  install the latest official release safely: the download is validated with `--version` before it
+  replaces anything, and a failed update can never corrupt the working binary.
 - **Settings → Dependencies** verifies the bundled engine and reports versions.
 
 ### Privacy
@@ -177,6 +200,19 @@ The first release build takes several minutes (dependency compilation plus ~330 
 package). Debug builds are dramatically faster.
 
 ---
+
+## DropDL v1.1.0
+
+### What's new in 1.1.0
+- **Every option is now real**: subtitles, metadata, thumbnails, chapters, proxy, cookies, speed
+  limit, overwrite mode and audio bitrate are all passed to yt-dlp/FFmpeg (previously some settings
+  existed in the UI without reaching the download engine).
+- yt-dlp **update checker** and safe self-update (Settings → Engine) with validation and rollback.
+- **Filename presets** and custom output templates with live preview.
+- Queue **reordering**, **Retry Failed**, and richer history actions (Open file, Copy URL,
+  Download again).
+- Expanded friendly **error categories** and per-download network/auth context (proxy and cookies
+  are applied at analysis time too).
 
 ## DropDL v1.0.0
 

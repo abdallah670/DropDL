@@ -126,9 +126,54 @@ export interface DownloadTask {
   fileSizeBytes?: number;
   /** Absolute path of the finished output file (set on completion). */
   filePath?: string;
+  /**
+   * Per-download yt-dlp options (subtitles/metadata/audio quality are stored
+   * with the task; network options like proxy/cookies are merged in from the
+   * current settings at launch time and never persisted).
+   */
+  options?: DownloadOptions;
 }
 
 export type NavTab = "download" | "formats" | "queue" | "history" | "playlist" | "settings" | "logs";
+
+/**
+ * Per-download yt-dlp options carried on the task.
+ *
+ * Two lifetimes:
+ * - "media" options (subtitles/metadata/audio quality) are chosen per download
+ *   and persisted with the task so retries and restarts reproduce them.
+ * - "network" options (proxy/cookies/rate limit/...) are merged in from the
+ *   *current* settings at launch time and are NEVER persisted, so credentials
+ *   never land in history.json / queue.json.
+ */
+export interface DownloadOptions {
+  // ---- network (launch-time only, never persisted) ----
+  proxy?: string;
+  rateLimitKbps?: number;
+  cookiesSource?: string | null;
+  cookiesFilePath?: string;
+  geoBypass?: boolean;
+  verbose?: boolean;
+  networkTimeoutSecs?: number;
+  retries?: number;
+  overwriteMode?: string;
+  customArgs?: string;
+  // ---- media (persisted with the task) ----
+  audioQuality?: string; // "best" | "320" | "256" | "192" | "128"
+  writeSubtitles?: boolean;
+  writeAutoSubs?: boolean;
+  /** Comma-separated sanitized list, e.g. "en,ar" or "all". */
+  subLangs?: string;
+  subFormat?: string; // "srt" | "vtt" | "ass" | "ssa" | "best"
+  embedSubs?: boolean;
+  embedMetadata?: boolean;
+  embedThumbnail?: boolean;
+  writeThumbnailFile?: boolean;
+  writeDescription?: boolean;
+  writeInfoJson?: boolean;
+  writeComments?: boolean;
+  embedChapters?: boolean;
+}
 
 export interface AppSettings {
   general: {

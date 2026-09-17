@@ -14,11 +14,12 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { tauriService } from "../../services/tauriService";
+import { EngineTab } from "./EngineTab";
 
 export const SettingsPage: React.FC = () => {
   const { settings, updateSettings, refreshDependencies, addToast, paths } = useAppStore();
   const [activeTab, setActiveTab] = useState<
-    "general" | "downloads"| "advanced"
+    "general" | "downloads" | "advanced" | "engine" | "about"
   >("general");
 
   const [verifying, setVerifying] = useState(false);
@@ -52,6 +53,8 @@ export const SettingsPage: React.FC = () => {
     { id: "general", label: "General", icon: <Settings className="w-3.5 h-3.5" /> },
     { id: "downloads", label: "Downloads", icon: <Sliders className="w-3.5 h-3.5" /> },
     { id: "advanced", label: "Network & Auth", icon: <Globe className="w-3.5 h-3.5" /> },
+    { id: "engine", label: "Engine", icon: <Terminal className="w-3.5 h-3.5" /> },
+    { id: "about", label: "About & Privacy", icon: <Info className="w-3.5 h-3.5" /> },
   ];
 
   return (
@@ -361,6 +364,13 @@ export const SettingsPage: React.FC = () => {
               <p className="text-[11px] text-neutral-400 mt-1">
                 Allows downloading age-restricted videos, private member videos, and bypassing bot verification prompts.
               </p>
+              {settings.advanced.cookiesSource && settings.advanced.cookiesSource !== "none" && (
+                <p className="text-[11px] text-amber-400/90 mt-1 leading-relaxed">
+                  {settings.advanced.cookiesSource === "file"
+                    ? "Point DropDL at a cookies.txt file exported from your browser (Netscape format). This is the most reliable and private option — the file never leaves your machine."
+                    : "Chromium browsers (Chrome, Edge, Brave) lock their cookie database while running and recent versions encrypt it. Fully close the browser before downloading, or use a cookies.txt file instead. Incognito/private windows are not supported."}
+                </p>
+              )}
             </div>
 
             {/* Proxy */}
@@ -427,6 +437,54 @@ export const SettingsPage: React.FC = () => {
                   </p>
                 </div>
               </label>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* About & Privacy (local-first statement + legal responsibility) */}
+      {activeTab === "about" && (
+        <div className="space-y-4">
+          <div className="p-4 rounded-lg bg-neutral-900 border border-neutral-800 space-y-3">
+            <h3 className="text-xs font-semibold uppercase text-neutral-300 font-mono tracking-wider flex items-center space-x-1.5">
+              <Shield className="w-3.5 h-3.5" />
+              <span>Privacy</span>
+            </h3>
+            <p className="text-[11px] text-neutral-400 leading-relaxed">
+              DropDL is a <span className="text-neutral-200 font-semibold">local desktop application</span>. All
+              downloads are processed locally on your machine by the bundled yt-dlp and FFmpeg binaries.
+            </p>
+            <ul className="text-[11px] text-neutral-400 leading-relaxed list-disc list-inside space-y-1">
+              <li>No backend server, no account, no telemetry or analytics.</li>
+              <li>URLs, history, queue, and settings never leave your computer.</li>
+              <li>Cookies (if you configure them) stay on your disk and are passed only to yt-dlp locally — they are never uploaded, logged, or included in error messages.</li>
+              <li>The only network requests DropDL itself makes are (a) analyzing/downloading the URLs you enter via yt-dlp, and (b) the optional "Check for Updates" call to GitHub when you press it.</li>
+            </ul>
+          </div>
+
+          <div className="p-4 rounded-lg bg-neutral-900 border border-neutral-800 space-y-3">
+            <h3 className="text-xs font-semibold uppercase text-neutral-300 font-mono tracking-wider flex items-center space-x-1.5">
+              <Info className="w-3.5 h-3.5" />
+              <span>Responsible Use</span>
+            </h3>
+            <p className="text-[11px] text-neutral-400 leading-relaxed">
+              DropDL is a local interface for yt-dlp. Users are responsible for ensuring that their downloads
+              comply with applicable laws and the terms of the services they use.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-lg bg-neutral-900 border border-neutral-800 space-y-2">
+            <h3 className="text-xs font-semibold uppercase text-neutral-300 font-mono tracking-wider">
+              About
+            </h3>
+            <div className="text-[11px] text-neutral-400 leading-relaxed space-y-1">
+              <p>DropDL — a Windows GUI for yt-dlp + FFmpeg.</p>
+              <p>
+                Powered by open-source software:{" "}
+                <span className="font-mono text-neutral-300">yt-dlp</span> (Unlicense) and{" "}
+                <span className="font-mono text-neutral-300">FFmpeg</span> (LGPL/GPL depending on build). These
+                projects are developed by their respective communities and are not affiliated with DropDL.
+              </p>
             </div>
           </div>
         </div>

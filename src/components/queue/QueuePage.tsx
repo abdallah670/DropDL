@@ -8,11 +8,12 @@ import {
   Terminal,
   Folder,
   CheckCircle2,
-  AlertCircle,
   Film,
   Music,
   RotateCcw,
   Sparkles,
+  ChevronUp,
+  ChevronDown,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { formatBytes } from "../../lib/utils";
@@ -30,8 +31,12 @@ export const QueuePage: React.FC = () => {
     cancelAll,
     retryAll,
     retryTask,
+    retryFailed,
     clearCompleted,
+    moveTaskUp,
+    moveTaskDown,
     setActiveNav,
+    addToast,
   } = useAppStore();
 
   const [expandedLogTaskId, setExpandedLogTaskId] = useState<string | null>(null);
@@ -48,6 +53,8 @@ export const QueuePage: React.FC = () => {
   const retryableCount = queue.filter(
     (t) => t.status === "failed" || t.status === "cancelled"
   ).length;
+  // Strictly failed tasks — "Retry Failed" leaves cancelled tasks untouched.
+  const failedCount = queue.filter((t) => t.status === "failed").length;
 
   // Aggregate batch progress across all pending tasks (playlist/queue level view)
   const pendingTasks = queue.filter((t) =>
@@ -145,6 +152,17 @@ export const QueuePage: React.FC = () => {
             <RotateCcw className="w-3.5 h-3.5" />
             <span>Retry All</span>
           </button>
+
+          {failedCount > 0 && (
+            <button
+              onClick={retryFailed}
+              className="flex items-center space-x-1 px-3 py-1.5 rounded bg-sky-950/60 hover:bg-sky-900/60 text-xs font-medium text-sky-300 transition-colors border border-sky-900"
+              title="Re-queue only the failed downloads (cancelled tasks are left alone)"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Retry Failed ({failedCount})</span>
+            </button>
+          )}
 
           <button
             onClick={clearCompleted}
@@ -308,6 +326,24 @@ export const QueuePage: React.FC = () => {
 
                   {/* Task Control Actions */}
                   <div className="flex items-center space-x-1.5 shrink-0 self-center">
+                    {(task.status === "queued" || task.status === "paused") && (
+                      <div className="flex flex-col space-y-0.5">
+                        <button
+                          onClick={() => moveTaskUp(task.id)}
+                          className="p-0.5 rounded hover:bg-neutral-800 text-neutral-500 hover:text-neutral-200 transition-colors"
+                          title="Move earlier in queue"
+                        >
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => moveTaskDown(task.id)}
+                          className="p-0.5 rounded hover:bg-neutral-800 text-neutral-500 hover:text-neutral-200 transition-colors"
+                          title="Move later in queue"
+                        >
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
                     {isDownloading && (
                       <button
                         onClick={() => pauseTask(task.id)}
@@ -328,6 +364,25 @@ export const QueuePage: React.FC = () => {
                       </button>
                     )}
 
+                    {(task.status === "queued" || task.status === "paused") && (
+                      <div className="flex flex-col">
+                        <button
+                          onClick={() => moveTaskUp(task.id)}
+                          className="p-0.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
+                          title="Move up in queue"
+                        >
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => moveTaskDown(task.id)}
+                          className="p-0.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
+                          title="Move down in queue"
+                        >
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+
                     {(task.status === "failed" || task.status === "cancelled") && (
                       <button
                         onClick={() => retryTask(task.id)}
@@ -346,6 +401,44 @@ export const QueuePage: React.FC = () => {
                       >
                         <Folder className="w-4 h-4 text-sky-400" />
                       </button>
+                    )}
+
+                    {(task.status === "queued" || task.status === "paused") && (
+                      <>
+                        <button
+                          onClick={() => moveTaskUp(task.id)}
+                          className="p-1.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
+                          title="Move up in queue"
+                        >
+                          <ChevronUp className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => moveTaskDown(task.id)}
+                          className="p-1.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
+                          title="Move down in queue"
+                        >
+                          <ChevronDown className="w-4 h-4" />
+                        </button>
+                      </>
+                    )}
+
+                    {task.status === "queued" && (
+                      <>
+                        <button
+                          onClick={() => moveTaskUp(task.id)}
+                          className="p-1.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
+                          title="Move up in queue"
+                        >
+                          <ChevronUp className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => moveTaskDown(task.id)}
+                          className="p-1.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
+                          title="Move down in queue"
+                        >
+                          <ChevronDown className="w-4 h-4" />
+                        </button>
+                      </>
                     )}
 
                     <button
@@ -375,6 +468,39 @@ export const QueuePage: React.FC = () => {
                 {/* Individual Task Expandable Logs */}
                 {isExpanded && (
                   <div className="mt-3 pt-3 border-t border-neutral-800/80">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] uppercase font-mono tracking-wider text-neutral-500">yt-dlp output</span>
+                      <div className="flex items-center space-x-2">
+                        {(task.originalError || task.errorMessage) && (
+                          <button
+                            onClick={async () => {
+                              try {
+                                await navigator.clipboard.writeText(task.originalError || task.errorMessage || "");
+                                addToast({ title: "Error copied", type: "success" });
+                              } catch {
+                                addToast({ title: "Copy failed", message: "Clipboard is unavailable.", type: "warning" });
+                              }
+                            }}
+                            className="text-[10px] px-2 py-0.5 rounded bg-red-950/60 border border-red-900 text-red-300 hover:bg-red-900/60 transition-colors"
+                          >
+                            Copy error
+                          </button>
+                        )}
+                        <button
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(task.logs.join("\n"));
+                              addToast({ title: "Log copied", type: "success" });
+                            } catch {
+                              addToast({ title: "Copy failed", message: "Clipboard is unavailable.", type: "warning" });
+                            }
+                          }}
+                          className="text-[10px] px-2 py-0.5 rounded bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
+                        >
+                          Copy log
+                        </button>
+                      </div>
+                    </div>
                     <div className="p-3 rounded bg-neutral-950 font-mono text-[11px] text-neutral-300 max-h-36 overflow-y-auto space-y-1">
                       {task.logs.length > 0 ? (
                         task.logs.map((log, idx) => (

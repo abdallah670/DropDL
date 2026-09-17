@@ -165,6 +165,27 @@ import { formatBytes } from "../../lib/utils";export const SimpleQualitySelector
 
   return (
     <div id="simple-quality-selector-panel" className="space-y-5 select-none">
+      {/* Big Download Button (top of panel for quick access) */}
+      <div className="flex items-center justify-between p-3 rounded-lg bg-neutral-900 border border-neutral-800">
+        <div className="text-xs text-neutral-400">
+          Selected:{" "}
+          <span className="text-neutral-200 font-semibold">
+            {mediaMode === "audio-only"
+              ? `Audio (${audioExtractionFormat} • ${audioQuality})`
+              : `${simpleQuality} • ${outputContainer}`}
+          </span>
+        </div>
+
+        <button
+          id="btn-download-now"
+          onClick={handleDownload}
+          className="px-6 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center space-x-2 transition-all shadow-md active:scale-98"
+        >
+          <Download className="w-4 h-4" />
+          <span>Download Media</span>
+        </button>
+      </div>
+
       {/* 1. Mode Selection: Video+Audio, Audio Only, Video Only */}
       <div className="p-4 rounded-lg bg-neutral-900 border border-neutral-800">
         <label className="text-xs font-semibold text-neutral-300 mb-3 block uppercase font-mono tracking-wider">
@@ -413,27 +434,6 @@ import { formatBytes } from "../../lib/utils";export const SimpleQualitySelector
             </div>
           )}
         </div>
-      </div>
-
-      {/* Big Download Button */}
-      <div className="pt-2 flex items-center justify-between">
-        <div className="text-xs text-neutral-400">
-          Selected:{" "}
-          <span className="text-neutral-200 font-semibold">
-            {mediaMode === "audio-only"
-              ? `Audio (${audioExtractionFormat} • ${audioQuality})`
-              : `${simpleQuality} • ${outputContainer}`}
-          </span>
-        </div>
-
-        <button
-          id="btn-download-now"
-          onClick={handleDownload}
-          className="px-6 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center space-x-2 transition-all shadow-md active:scale-98"
-        >
-          <Download className="w-4 h-4" />
-          <span>Download Media</span>
-        </button>
       </div>
     </div>
   );

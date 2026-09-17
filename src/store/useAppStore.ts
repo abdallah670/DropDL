@@ -3,6 +3,7 @@ import {
   YtDlpMediaInfo,
   YtDlpFormat,
   DownloadTask,
+  DownloadOptions,
   AppSettings,
   DependencyStatus,
   LogEntry,
@@ -32,6 +33,8 @@ export interface SubtitleSettings {
   autoSubs: boolean;
   embedSubs: boolean;
   downloadSubFiles: boolean;
+  downloadEnabled: boolean;
+  allLangs: boolean;
   format: "VTT" | "SRT" | "ASS";
 }
 
@@ -42,7 +45,168 @@ export interface MetadataSettings {
   writeInfoJson: boolean;
   writeThumbnailFile: boolean;
   writeComments: boolean;
-  writeChapters: boolean;
+  embedChapters: boolean;
+}
+
+/**
+ * Validate a user-supplied proxy string. Only explicit schemes that yt-dlp
+ * supports are accepted; anything else is rejected so a typo can't silently
+ * route (or fail to route) traffic.
+ */
+export function validateProxy(proxy: string): { ok: boolean; message?: string } {
+  const p = (proxy || "").trim();
+  if (!p) return { ok: true };
+  if (!/^(https?|socks4|socks5):\/\/.+/i.test(p)) {
+    return {
+      ok: false,
+      message: "Proxy must start with http://, https://, socks4:// or socks5:// (e.g. socks5://127.0.0.1:9050).",
+    };
+  }
+  if (p.length > 512) return { ok: false, message: "Proxy value is too long." };
+  return { ok: true };
+}
+
+/** Windows filename-hostile characters: never allowed in output templates. */
+const WINDOWS_INVALID_TEMPLATE_CHARS = /[<>:"/\\|?*\x00-\x1f]/;
+
+/**
+ * Validate a custom yt-dlp output template. Returns an error message, or null
+ * when the template is safe to pass through.
+ */
+export function validateOutputTemplate(template: string): string | null {
+  const t = (template || "").trim();
+  if (!t) return null;
+  if (t.includes("..")) return "Template must not contain '..' (path traversal).";
+  if (WINDOWS_INVALID_TEMPLATE_CHARS.test(t)) {
+    return "Template must not contain any of < > : \" / \\ | ? * (invalid on Windows).";
+  }
+  if (t.length > 180) return "Template is too long (max 180 characters).";
+  return null;
+}
+
+/**
+ * Render a template preview by substituting the fields yt-dlp will fill in.
+ * Display-only; yt-dlp does the real substitution at download time.
+ */
+export function previewOutputTemplate(
+  template: string,
+  sample: { title: string; uploader?: string; uploadDate?: string; playlistIndex?: number }
+): string {
+  const safe = (s: string) =>
+    s.replace(/[<>:"/\\|?*\x00-\x1f]/g, "").trim().slice(0, 120) || "video";
+  return template
+    .replace(/%\(title\)s/g, safe(sample.title))
+    .replace(/%\(uploader\)s/g, safe(sample.uploader || "uploader"))
+    .replace(/%\((?:upload_date|upload_date>[^)]*)\)s/g, sample.uploadDate || "20240101")
+    .replace(/%\(playlist_index\)0?2d/g, String(sample.playlistIndex ?? 1).padStart(2, "0"))
+    .replace(/%\(playlist_title\)s/g, "playlist")
+    .replace(/%\(ext\)s/g, "mp4");
+}
+
+/** User-friendly filename presets backed by yt-dlp's native output template. */
+export type NamingPreset =
+  | "title"
+  | "title-uploader"
+  | "uploader-title"
+  | "title-date"
+  | "playlist-index"
+  | "custom";
+
+export const NAMING_PRESET_TEMPLATES: Record<Exclude<NamingPreset, "custom">, string> = {
+  title: "%(title)s.%(ext)s",
+  "title-uploader": "%(title)s - %(uploader)s.%(ext)s",
+  "uploader-title": "%(uploader)s - %(title)s.%(ext)s",
+  "title-date": "%(title)s [%(upload_date)s].%(ext)s",
+  "playlist-index": "%(playlist_index)02d - %(title)s.%(ext)s",
+};
+
+/**
+ * Resolve the selected preset (or validated custom template) to the yt-dlp
+ * output template passed as -o. Returns undefined for the default naming so
+ * yt-dlp's own "%(title)s.%(ext)s" applies untouched.
+ */
+export function templateForNaming(preset: NamingPreset, custom: string): string | undefined {
+  if (preset === "custom") {
+    const t = (custom || "").trim();
+    return t && !validateOutputTemplate(t) ? t : undefined;
+  }
+  return NAMING_PRESET_TEMPLATES[preset];
+}
+
+/**
+ * Build the persisted "media" options block from the per-download subtitles /
+ * metadata panels. Honest plumbing: these flags are passed verbatim to yt-dlp
+ * by the Rust backend, never shown as raw CLI to the user.
+ */
+export function buildMediaOptions(
+  subtitles: SubtitleSettings,
+  metadata: MetadataSettings,
+  mediaType: "video" | "audio",
+  container: string,
+  audioQuality: string
+): DownloadOptions {
+  const opts: DownloadOptions = { audioQuality };
+  const langs = subtitles.allLangs
+    ? "all"
+    : subtitles.selectedLangs
+        .map((l) => l.trim().toLowerCase())
+        .filter((l) => /^[a-z0-9_.\-]+$/i.test(l))
+        .join(",");
+  if (subtitles.downloadEnabled && (langs || subtitles.autoSubs)) {
+    if (langs) {
+      opts.writeSubtitles = true;
+      opts.subLangs = subtitles.allLangs ? "all" : langs;
+    }
+    if (subtitles.autoSubs) opts.writeAutoSubs = true;
+    opts.subFormat = subtitles.format.toLowerCase();
+    // Embedding only works where the container can hold soft subtitles:
+    // MP4/MKV embed fine (MP4 via mov_text). WebM cannot carry them, so for
+    // WebM we fall back to separate sidecar files.
+    const canEmbed =
+      mediaType === "video" &&
+      ["MP4", "MKV", "ORIGINAL"].includes(container.toUpperCase());
+    opts.embedSubs = subtitles.embedSubs && canEmbed;
+  }
+  if (metadata.embedMetadata) opts.embedMetadata = true;
+  if (metadata.embedThumbnail) opts.embedThumbnail = true;
+  if (metadata.writeThumbnailFile) opts.writeThumbnailFile = true;
+  if (metadata.writeDescription) opts.writeDescription = true;
+  if (metadata.writeInfoJson) opts.writeInfoJson = true;
+  if (metadata.writeComments) opts.writeComments = true;
+  // yt-dlp only supports --embed-chapters (there is no --write-chapters).
+  if (metadata.embedChapters) opts.embedChapters = true;
+  return opts;
+}
+
+/**
+ * Build the launch-time "network" options block from settings. Deliberately
+ * NOT persisted with the task: it is merged in at process spawn so proxy /
+ * cookie changes apply immediately and credentials never touch disk history.
+ */
+export function buildNetworkOptions(settings: AppSettings): DownloadOptions {
+  const proxy = (settings.advanced.proxy || "").trim();
+  const cookiesSource = settings.advanced.cookiesSource;
+  return {
+    proxy: validateProxy(proxy).ok && proxy ? proxy : undefined,
+    rateLimitKbps:
+      settings.downloads.rateLimitKbps && settings.downloads.rateLimitKbps > 0
+        ? Math.floor(settings.downloads.rateLimitKbps)
+        : undefined,
+    cookiesSource:
+      cookiesSource && cookiesSource !== "none" ? cookiesSource : undefined,
+    cookiesFilePath:
+      cookiesSource === "file"
+        ? (settings.advanced.cookiesFilePath || "").trim() || undefined
+        : undefined,
+    geoBypass: settings.advanced.geoBypass || undefined,
+    verbose: settings.advanced.verboseLogs || undefined,
+    networkTimeoutSecs: settings.advanced.networkTimeoutSecs > 0
+      ? Math.floor(settings.advanced.networkTimeoutSecs)
+      : undefined,
+    retries: settings.downloads.retries > 0 ? Math.floor(settings.downloads.retries) : undefined,
+    overwriteMode: settings.downloads.overwriteMode || settings.downloads.overwriteBehavior,
+    customArgs: (settings.ytdlp.customArgs || "").trim() || undefined,
+  };
 }
 
 interface AppStore {
@@ -69,6 +233,12 @@ interface AppStore {
   setAudioExtractionFormat: (f: "MP3" | "M4A" | "OPUS" | "FLAC" | "WAV") => void;
   audioQuality: "best" | "320" | "256" | "192" | "128";
   setAudioQuality: (q: "best" | "320" | "256" | "192" | "128") => void;
+
+  // File naming (yt-dlp output template presets + custom template)
+  namingPreset: NamingPreset;
+  setNamingPreset: (p: NamingPreset) => void;
+  customTemplate: string;
+  setCustomTemplate: (t: string) => void;
 
   // Advanced Formats Selection
   selectedVideoFormatId: string | null;
@@ -110,6 +280,9 @@ interface AppStore {
   removeHistoryItem: (id: string) => void;
   enqueueTask: (task: DownloadTask) => void;
   maybeStartNextQueued: () => void;
+  moveTaskUp: (id: string) => void;
+  moveTaskDown: (id: string) => void;
+  retryFailed: () => void;
   clearLogs: () => void;
   addToast: (toast: { title: string; message?: string; body?: string; type?: "info" | "success" | "warning" }) => void;
 
@@ -229,6 +402,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
   audioQuality: "320",
   setAudioQuality: (q) => set({ audioQuality: q }),
 
+  namingPreset: "title",
+  setNamingPreset: (p) => set({ namingPreset: p }),
+  customTemplate: "",
+  setCustomTemplate: (t) => set({ customTemplate: t }),
+
   selectedVideoFormatId: null,
   setSelectedVideoFormatId: (id) => set({ selectedVideoFormatId: id }),
   selectedAudioFormatId: null,
@@ -253,7 +431,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
     selectedLangs: ["en"],
     autoSubs: false,
     embedSubs: true,
-    downloadSubFiles: false,
+    downloadSubFiles: true,
+    downloadEnabled: false,
+    allLangs: false,
     format: "VTT",
   },
   updateSubtitlesConfig: (partial) =>
@@ -266,7 +446,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     writeInfoJson: false,
     writeThumbnailFile: false,
     writeComments: false,
-    writeChapters: true,
+    embedChapters: true,
   },
   updateMetadataConfig: (partial) =>
     set((state) => ({ metadataConfig: { ...state.metadataConfig, ...partial } })),
@@ -428,7 +608,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
     get().addLog("info", `[yt-dlp] Analyzing media stream manifest for: ${url}`);
 
     try {
-      const result = await tauriService.analyzeUrl(url);
+      // Network/auth context so bot-checks and age-gates can be satisfied at
+      // analysis time (proxy + cookies from Network & Auth settings).
+      const { settings } = get();
+      const result = await tauriService.analyzeUrl(url, {
+        proxy: settings.advanced.proxy,
+        cookiesSource: settings.advanced.cookiesSource,
+        cookiesFilePath: settings.advanced.cookiesFilePath,
+      });
       if (result.playlist) {
         set({ playlist: result.playlist, activeNav: "playlist" });
         get().addLog("info", `[yt-dlp] Playlist manifest resolved with ${result.playlist.entries.length} items`);
@@ -476,9 +663,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
       settings,
       activeMediaTab,
       customSelectorFormula,
+      subtitlesConfig,
+      metadataConfig,
+      namingPreset,
+      customTemplate,
     } = get();
 
     if (!mediaInfo) return;
+
+    const namingTemplate = templateForNaming(namingPreset, customTemplate);
 
     let formatSelector = "bv*+ba/b";
     let resLabel = "Best Quality";
@@ -522,6 +715,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
 
     const taskId = "task-" + Date.now();
+    const container = mediaMode === "audio-only" ? audioExtractionFormat : outputContainer;
     const newTask: DownloadTask = {
       id: taskId,
       url: mediaInfo.webpage_url,
@@ -530,7 +724,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
       mediaType,
       resolutionLabel: resLabel,
       formatSelector,
-      container: mediaMode === "audio-only" ? audioExtractionFormat : outputContainer,
+      container,
+      // Per-download media options (subtitles/metadata/audio quality) ride
+      // along with the task so retries and restarts reproduce them exactly.
+      // Network options (proxy/cookies/rate limit/...) are merged in from the
+      // current settings at launch time and are never persisted.
+      options: buildMediaOptions(subtitlesConfig, metadataConfig, mediaType, container, audioQuality),
+      // Filename preset / custom template (yt-dlp -o). Relative template so
+      // the -P destination folder above still applies.
+      ...(namingTemplate ? { outputTemplate: namingTemplate } : {}),
       destinationPath: settings.downloads.defaultFolder,
       status: "queued",
       progress: 0,
@@ -567,6 +769,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
       audioQuality,
       audioExtractionFormat,
       outputContainer,
+      subtitlesConfig,
+      metadataConfig,
+      namingPreset,
+      customTemplate,
     } = get();
     if (!playlist) return;
 
@@ -599,6 +805,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     const container = batchContainer;
 
     const numberedPrefix = overrides?.numberedPrefix ?? false;
+    const namingTemplate = templateForNaming(namingPreset, customTemplate);
 
     const newTasks: DownloadTask[] = selectedEntries.map((entry, idx) => ({
       id: "pl-task-" + Date.now() + "-" + idx,
@@ -609,10 +816,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
       resolutionLabel,
       formatSelector,
       container,
+      options: buildMediaOptions(subtitlesConfig, metadataConfig, mediaType, container, audioQuality),
       // Optional numbered filenames (01 - Title.mp4) using the playlist index.
       // The template is relative so the -P destination folder still applies.
+      // Without the numbered option, the Download page's filename preset
+      // (e.g. "Playlist № + Title") applies instead.
       ...(numberedPrefix
         ? { outputTemplate: `${String(entry.index).padStart(2, "0")} - %(title)s.%(ext)s` }
+        : namingTemplate && namingPreset !== "title"
+        ? { outputTemplate: namingTemplate }
         : {}),
       // Sanitize for a valid folder name while PRESERVING non-Latin scripts
       // (Arabic, Chinese, ...): only strip characters Windows forbids in
@@ -678,10 +890,20 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   resumeTask: (id) => {
-    const task = get().queue.find((t) => t.id === id);
-    if (!task) return;
+    const stored = get().queue.find((t) => t.id === id);
+    if (!stored) return;
 
     manuallyPaused.delete(id);
+
+    // Merge launch-time network options from the CURRENT settings (proxy,
+    // cookies, rate limit, geo-bypass, timeout, retries...). The persisted
+    // task keeps only media options, so credentials never touch disk history
+    // and settings changes apply to already-queued tasks immediately.
+    const launchTask: DownloadTask = {
+      ...stored,
+      options: { ...(stored.options || {}), ...buildNetworkOptions(get().settings) },
+    };
+    const task = launchTask;
 
     // Clear any stale phase note ("Part 2 of 2", "Merging...") left by a
     // previous run so resume starts with a clean status line.
@@ -800,6 +1022,61 @@ export const useAppStore = create<AppStore>((set, get) => ({
       ),
     }));
     // Free any concurrency slots the worker thinks are occupied.
+    get().maybeStartNextQueued();
+    get().persistNow();
+  },
+
+  /**
+   * Swap a pending task one slot earlier in the queue. Only pending tasks
+   * (queued/paused/failed/cancelled) participate — running or finished tasks
+   * keep their absolute slots.
+   */
+  moveTaskUp: (id) => {
+    set((state) => {
+      const i = state.queue.findIndex((t) => t.id === id);
+      if (i <= 0) return state;
+      const pending = (t: DownloadTask) =>
+        ["queued", "paused", "failed", "cancelled"].includes(t.status);
+      if (!pending(state.queue[i])) return state;
+      let j = i - 1;
+      while (j >= 0 && !pending(state.queue[j])) j--;
+      if (j < 0) return state;
+      const q = [...state.queue];
+      [q[i], q[j]] = [q[j], q[i]];
+      return { queue: q };
+    });
+    get().persistNow();
+  },
+
+  moveTaskDown: (id) => {
+    set((state) => {
+      const i = state.queue.findIndex((t) => t.id === id);
+      if (i < 0 || i >= state.queue.length - 1) return state;
+      const pending = (t: DownloadTask) =>
+        ["queued", "paused", "failed", "cancelled"].includes(t.status);
+      if (!pending(state.queue[i])) return state;
+      let j = i + 1;
+      while (j < state.queue.length && !pending(state.queue[j])) j++;
+      if (j >= state.queue.length) return state;
+      const q = [...state.queue];
+      [q[i], q[j]] = [q[j], q[i]];
+      return { queue: q };
+    });
+    get().persistNow();
+  },
+
+  /** Re-queue every failed task (Retry All covers failed + cancelled). */
+  retryFailed: () => {
+    const failed = get().queue.filter((t) => t.status === "failed");
+    if (failed.length === 0) return;
+    set((state) => ({
+      queue: state.queue.map((t) =>
+        t.status === "failed"
+          ? { ...t, status: "queued" as const, progress: 0, speed: 0, etaSeconds: 0, postProcessingStep: undefined }
+          : t
+      ),
+    }));
+    get().addToast({ title: "Retrying Failed", message: `${failed.length} task(s) re-queued`, type: "info" });
     get().maybeStartNextQueued();
     get().persistNow();
   },

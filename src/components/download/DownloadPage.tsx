@@ -15,6 +15,7 @@ import { useAppStore } from "../../store/useAppStore";
 import { UrlInputSection } from "./UrlInputSection";
 import { MediaHeader } from "./MediaHeader";
 import { SimpleQualitySelector } from "./SimpleQualitySelector";
+import { NamingSection } from "./NamingSection";
 import { FormatExplorer } from "../formats/FormatExplorer";
 import { SubtitlesSection } from "../subtitles/SubtitlesSection";
 import { MetadataSection } from "../metadata/MetadataSection";
@@ -51,6 +52,7 @@ export const DownloadPage: React.FC = () => {
         <div className="space-y-4 animate-in fade-in duration-150">
           <MediaHeader />
           {activeMediaTab === "simple" && <SimpleQualitySelector />}
+          {activeMediaTab === "simple" && <NamingSection />}
           {activeMediaTab === "formats" && <FormatExplorer />}
           {activeMediaTab === "subtitles" && <SubtitlesSection />}
           {activeMediaTab === "metadata" && <MetadataSection />}

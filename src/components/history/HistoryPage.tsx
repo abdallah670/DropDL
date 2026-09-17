@@ -15,9 +15,10 @@ import {
 import { useAppStore } from "../../store/useAppStore";
 import { formatBytes } from "../../lib/utils";
 import { explainFormat } from "../../lib/formatSelector";
+import type { DownloadTask } from "../../types/ytdlp";
 
 export const HistoryPage: React.FC = () => {
-  const { history, clearHistory, removeHistoryItem, enqueueTask, addToast } = useAppStore();
+  const { history, clearHistory, removeHistoryItem, enqueueTask, addToast, setActiveNav } = useAppStore();
   const [search, setSearch] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -158,14 +159,79 @@ export const HistoryPage: React.FC = () => {
 
               {/* Actions */}
               <div className="flex items-center space-x-1 shrink-0 self-end sm:self-center">
+                {item.filePath && (
+                  <button
+                    onClick={async () => {
+                      try {
+                        const tauri = (window as any).__TAURI__;
+                        if (tauri?.invoke) await tauri.invoke("open_file", { path: item.filePath });
+                        else throw new Error("Not available");
+                      } catch {
+                        addToast({
+                          title: "Could not open file",
+                          message: item.filePath,
+                          type: "warning",
+                        });
+                      }
+                    }}
+                    className="p-1.5 rounded hover:bg-neutral-800 text-neutral-300 transition-colors"
+                    title="Open file with the default player"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                  </button>
+                )}
+
                 <button
-                  onClick={() => handleOpenFolder(item.destinationPath)}
+                  onClick={() => handleOpenFolder(item.filePath ? item.filePath.replace(/[\\/][^\\/]+$/, "") : item.destinationPath)}
                   className="p-1.5 rounded hover:bg-neutral-800 text-neutral-300 transition-colors"
                   title="Reveal in file explorer"
                 >
                   <Folder className="w-4 h-4" />
                 </button>
 
+                <button
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(item.url);
+                      setCopiedId(item.id);
+                      setTimeout(() => setCopiedId(null), 1500);
+                    } catch {
+                      addToast({ title: "Copy failed", message: "Clipboard is unavailable.", type: "warning" });
+                    }
+                  }}
+                  className="p-1.5 rounded hover:bg-neutral-800 text-neutral-300 transition-colors"
+                  title="Copy URL"
+                >
+                  {copiedId === item.id ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                </button>
+
+                <button
+                  onClick={() => {
+                    // Re-enqueue a fresh copy of this item using its recorded
+                    // settings. Credentials are never part of a task, so the
+                    // copy is safe to persist.
+                    const copy: DownloadTask = {
+                      ...item,
+                      id: "hist-" + Date.now(),
+                      status: "queued",
+                      progress: 0,
+                      downloadedBytes: 0,
+                      totalBytes: 0,
+                      speed: 0,
+                      etaSeconds: 0,
+                      filePath: undefined,
+                      logs: [`[${new Date().toLocaleTimeString()}] Re-downloaded from history`],
+                      createdAt: Date.now(),
+                    };
+                    enqueueTask(copy);
+                    setActiveNav("queue");
+                    addToast({ title: "Re-download queued", message: item.title, type: "success" });
+                  }}
+                  className="p-1.5 rounded hover:bg-neutral-800 text-neutral-300 transition-colors"
+                  title="Download again"
+                >
+                  <RotateCcw className="w-4 h-4 text-sky-400" />
+                </button>
 
                 <button
                   onClick={() => removeHistoryItem(item.id)}

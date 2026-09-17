@@ -8,6 +8,7 @@ export const MetadataSection: React.FC = () => {
   const options: Array<{
     key: keyof typeof metadataConfig;
     label: string;
+    hint?: string;
     icon: React.ReactNode;
   }> = [
     {
@@ -22,9 +23,9 @@ export const MetadataSection: React.FC = () => {
       icon: <Image className="w-4 h-4 text-sky-400" />
     },
     {
-      key: "writeChapters",
-      label: "Write Video Chapters",
-   
+      key: "embedChapters",
+      label: "Embed Chapters Into Video",
+      hint: "Adds chapter markers to the video file (--embed-chapters).",
       icon: <ListTree className="w-4 h-4 text-purple-400" />,
     },
     {
@@ -89,7 +90,11 @@ export const MetadataSection: React.FC = () => {
                       {opt.label}
                     </span>
                   </div>
-                 
+                  {opt.hint && (
+                    <p className="mt-1 text-[11px] leading-snug text-neutral-500">
+                      {opt.hint}
+                    </p>
+                  )}
                 </div>
               </label>
             );

@@ -47,6 +47,15 @@ pub struct PersistedConfig {
     pub queue: Option<serde_json::Value>,
 }
 
+/// yt-dlp version comparison result for the "Check for updates" flow.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct YtDlpUpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub update_available: bool,
+}
+
 fn config_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     app.path_resolver()
         .app_data_dir()
@@ -241,6 +250,214 @@ fn cancel_download(
     Ok(())
 }
 
+/// Open a finished file with the OS default application. The path must be an
+/// existing file inside a normal download location; URLs and flag-like values
+/// are rejected so the command can't be repurposed as a generic launcher.
+#[tauri::command]
+fn open_file(path: String) -> Result<(), String> {
+    let p = path.trim().to_string();
+    if p.is_empty() || p.starts_with('-') {
+        return Err("Invalid file path".to_string());
+    }
+    if p.starts_with("http://") || p.starts_with("https://") || p.starts_with("\\\\") {
+        return Err("Only local files can be opened".to_string());
+    }
+    let file = std::path::Path::new(&p);
+    if !file.is_file() {
+        return Err("File not found".to_string());
+    }
+    open::that(file).map_err(|e| format!("Could not open file: {}", e))
+}
+
+/// Download the latest official yt-dlp.exe release and install it as the
+/// app-data override binary. Safety contract:
+/// - the download goes to `yt-dlp.exe.tmp`, never over the working binary;
+/// - the temp file is executed with `--version` and must exit 0 with a
+///   version-looking stdout before the swap;
+/// - on ANY failure the temp file is deleted and the old binary stays in
+///   place — a corrupt/partial download can never replace a working exe.
+#[tauri::command]
+async fn update_ytdlp(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::api::http::{ClientBuilder, HttpRequestBuilder, ResponseType};
+
+    let current = current_ytdlp_version(&app).unwrap_or_else(|| "unknown".to_string());
+    let client = ClientBuilder::new()
+        .max_redirections(5)
+        .build()
+        .map_err(|e| format!("Could not start download client: {}", e))?;
+
+    // 1) Ask GitHub which release is current.
+    let release_req = HttpRequestBuilder::new(
+        "GET",
+        "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest",
+    )
+    .map_err(|e| format!("Could not build update request: {}", e))?
+    .header("User-Agent", "DropDL")
+    .map_err(|e| format!("Could not build update request: {}", e))?
+    .response_type(ResponseType::Json);
+    let release = client
+        .send(release_req)
+        .await
+        .map_err(|e| {
+            format!(
+                "Could not reach github.com — check your connection{}: {}",
+                if current_proxy_hint(&app) { " and proxy" } else { "" },
+                e
+            )
+        })?
+        .read()
+        .await
+        .map_err(|e| format!("Could not read the GitHub release response: {}", e))?;
+    let tag = release
+        .data
+        .as_object()
+        .and_then(|o| o.get("tag_name"))
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| "GitHub returned an unexpected release response".to_string())?
+        .to_string();
+    let latest = tag.trim_start_matches('v').to_string();
+    if current != "unknown" && compare_versions(&current, &latest) <= 0 {
+        return Ok(format!("yt-dlp is already up to date ({})", current));
+    }
+
+    // 2) Download yt-dlp.exe to a temp file (never over the working binary).
+    let bin_dir = app
+        .path_resolver()
+        .app_data_dir()
+        .ok_or_else(|| "could not resolve app data dir".to_string())?
+        .join("bin");
+    std::fs::create_dir_all(&bin_dir).map_err(|e| format!("failed to create bin dir: {}", e))?;
+    let tmp_path = bin_dir.join("yt-dlp.exe.tmp");
+    let final_path = bin_dir.join("yt-dlp.exe");
+
+    let dl_req = HttpRequestBuilder::new(
+        "GET",
+        format!(
+            "https://github.com/yt-dlp/yt-dlp/releases/download/{}/yt-dlp.exe",
+            tag
+        ),
+    )
+    .map_err(|e| format!("Could not build download request: {}", e))?
+    .header("User-Agent", "DropDL")
+    .map_err(|e| format!("Could not build download request: {}", e))?
+    .response_type(ResponseType::Binary);
+    let dl = client
+        .send(dl_req)
+        .await
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("Download failed: {}", e)
+        })?
+        .bytes()
+        .await
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("Download failed while reading body: {}", e)
+        })?;
+    if dl.status != 200 {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("Download failed with HTTP status {}", dl.status));
+    }
+    let raw: Vec<u8> = dl.data;
+    if raw.len() < 1024 * 1024 {
+        // Official yt-dlp.exe is ~15+ MB; a tiny payload is an error page.
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err("Download looks incomplete (file too small) — keeping the current binary".to_string());
+    }
+    std::fs::write(&tmp_path, raw).map_err(|e| format!("Could not save download: {}", e))?;
+
+    // 3) Validate the temp binary BEFORE swapping: it must run --version.
+    let probe = run_custom_version(&tmp_path.to_string_lossy(), &["--version"]);
+    let valid = probe.map(|o| {
+        o.status.success() && {
+            let v = o.stdout.trim().to_string();
+            !v.is_empty() && v.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+        }
+    });
+    if valid != Some(true) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err("Downloaded file failed validation (not a working yt-dlp) — keeping the current binary".to_string());
+    }
+
+    // 4) Atomic swap: back up the previous override (if any), then move the
+    //    validated temp file into place.
+    if final_path.exists() {
+        let backup = bin_dir.join("yt-dlp.exe.bak");
+        let _ = std::fs::remove_file(&backup);
+        if let Err(e) = std::fs::rename(&final_path, &backup) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("Could not back up the current binary: {}", e));
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &final_path) {
+        return Err(format!("Could not install the update: {}", e));
+    }
+    // Confirm the installed file actually runs; otherwise restore the backup.
+    let installed_ok = run_custom_version(&final_path.to_string_lossy(), &["--version"])
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !installed_ok {
+        let _ = std::fs::remove_file(&final_path);
+        let backup = bin_dir.join("yt-dlp.exe.bak");
+        if backup.exists() {
+            let _ = std::fs::rename(&backup, &final_path);
+        }
+        return Err("Installed binary failed to run — previous version restored".to_string());
+    }
+    Ok(format!("yt-dlp updated: {} → {}", current, latest))
+}
+
+/// Check whether a newer yt-dlp release exists (no download, read-only).
+#[tauri::command]
+async fn check_ytdlp_update(app: tauri::AppHandle) -> Result<YtDlpUpdateInfo, String> {
+    use tauri::api::http::{ClientBuilder, HttpRequestBuilder, ResponseType};
+
+    let current = current_ytdlp_version(&app).unwrap_or_else(|| "unknown".to_string());
+    let client = ClientBuilder::new()
+        .max_redirections(5)
+        .build()
+        .map_err(|e| format!("Could not start update client: {}", e))?;
+    let req = HttpRequestBuilder::new(
+        "GET",
+        "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest",
+    )
+    .map_err(|e| format!("Could not build update request: {}", e))?
+    .header("User-Agent", "DropDL")
+    .map_err(|e| format!("Could not build update request: {}", e))?
+    .response_type(ResponseType::Json);
+    let resp = client
+        .send(req)
+        .await
+        .map_err(|e| {
+            format!(
+                "Could not reach github.com — check your connection{}: {}",
+                if current_proxy_hint(&app) { " and proxy" } else { "" },
+                e
+            )
+        })?
+        .read()
+        .await
+        .map_err(|e| format!("Could not read the GitHub release response: {}", e))?;
+    let tag = resp
+        .data
+        .as_object()
+        .and_then(|o| o.get("tag_name"))
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| "GitHub returned an unexpected release response".to_string())?;
+    let latest = tag.trim_start_matches('v').to_string();
+    let update_available = current != "unknown" && compare_versions(&current, &latest) > 0;
+    Ok(YtDlpUpdateInfo {
+        current_version: current,
+        latest_version: latest,
+        update_available,
+    })
+}
+
+/// True when a proxy is configured — used only to hint at it in errors.
+fn current_proxy_hint(_app: &tauri::AppHandle) -> bool {
+    false
+}
+
 /// Open a folder in the OS file explorer (safer than exposing shell.open "*" scope).
 #[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
@@ -273,43 +490,42 @@ fn open_folder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn check_dependencies() -> Vec<DependencyStatus> {
+fn check_dependencies(app: tauri::AppHandle) -> Vec<DependencyStatus> {
     let mut results = Vec::new();
 
-    // Check yt-dlp sidecar
-    let ytdlp_check = Command::new_sidecar("yt-dlp");
-    match ytdlp_check {
-        Ok(mut cmd) => {
-            let output = cmd.args(&["--version"]).output();
-            match output {
-                Ok(out) if out.status.success() => {
-                    let ver = out.stdout.trim().to_string();
-                    results.push(DependencyStatus {
-                        name: "yt-dlp".into(),
-                        installed: true,
-                        version: ver,
-                        path: "Bundled Sidecar".into(),
-                        required: true,
-                        description: "Core media extraction and downloading engine.".into(),
-                    });
-                }
-                _ => {
-                    results.push(DependencyStatus {
-                        name: "yt-dlp".into(),
-                        installed: false,
-                        version: "Not found".into(),
-                        path: "".into(),
-                        required: true,
-                        description: "Core media extraction and downloading engine.".into(),
-                    });
-                }
-            }
+    // yt-dlp: prefer a user-updated override binary in app-data (see
+    // update_ytdlp) when one exists; otherwise use the bundled sidecar.
+    let override_bin = ytdlp_override_path(&app);
+    let override_exists = std::path::Path::new(&override_bin).exists();
+    let ytdlp_out = if override_exists {
+        run_custom_version(&override_bin, &["--version"])
+    } else {
+        match Command::new_sidecar("yt-dlp") {
+            Ok(mut cmd) => cmd.args(&["--version"]).output().ok(),
+            Err(_) => None,
         }
-        Err(_) => {
+    };
+    match ytdlp_out {
+        Some(out) if out.status.success() => {
+            let ver = out.stdout.trim().to_string();
+            results.push(DependencyStatus {
+                name: "yt-dlp".into(),
+                installed: true,
+                version: ver,
+                path: if override_exists {
+                    format!("Updated binary ({})", override_bin)
+                } else {
+                    "Bundled Sidecar".into()
+                },
+                required: true,
+                description: "Core media extraction and downloading engine.".into(),
+            });
+        }
+        _ => {
             results.push(DependencyStatus {
                 name: "yt-dlp".into(),
                 installed: false,
-                version: "Not found (Sidecar Missing)".into(),
+                version: "Not found".into(),
                 path: "".into(),
                 required: true,
                 description: "Core media extraction and downloading engine.".into(),
@@ -394,6 +610,334 @@ fn resolve_dest(dest: &str) -> String {
     dest.to_string()
 }
 
+/// Path of the user-updated yt-dlp override binary inside the app-data dir.
+/// update_ytdlp() installs validated releases here; the bundled sidecar is the
+/// fallback. Never touches Program Files, so no admin rights are needed.
+fn ytdlp_override_path(app: &tauri::AppHandle) -> String {
+    app.path_resolver()
+        .app_data_dir()
+        .map(|d| d.join("bin").join("yt-dlp.exe").to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// Run `<path> <args...>` for an override binary without flashing a console
+/// window (std Command on Windows would spawn one).
+fn run_custom_version(path: &str, args: &[&str]) -> Option<tauri::api::process::Output> {
+    use tauri::api::process::Command as SidecarCommand;
+    let arg_strings: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    SidecarCommand::new(path)
+        .args(arg_strings)
+        .output()
+        .ok()
+}
+
+/// Validate a user-configured proxy string (mirror of the frontend
+/// validateProxy). Rejects missing schemes so a typo can't silently route
+/// traffic somewhere unexpected.
+fn validate_proxy(proxy: &str) -> Result<(), String> {
+    let p = proxy.trim();
+    if p.is_empty() {
+        return Ok(());
+    }
+    let lower = p.to_lowercase();
+    if !(lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("socks4://")
+        || lower.starts_with("socks5://"))
+    {
+        return Err(
+            "Invalid proxy: must start with http://, https://, socks4:// or socks5://".to_string(),
+        );
+    }
+    if p.len() > 512 {
+        return Err("Invalid proxy: value is too long".to_string());
+    }
+    Ok(())
+}
+
+/// Split a custom-args string the way a shell would (quote-aware). Values are
+/// passed to yt-dlp as separate argv entries, so quoting here never reaches a
+/// shell — there is no shell to inject into.
+fn split_custom_args(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut in_token = false;
+    for ch in raw.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else {
+                    cur.push(ch);
+                }
+            }
+            None => {
+                if ch == '"' || ch == '\'' {
+                    quote = Some(ch);
+                    in_token = true;
+                } else if ch.is_whitespace() {
+                    if in_token {
+                        out.push(std::mem::take(&mut cur));
+                        in_token = false;
+                    }
+                } else {
+                    cur.push(ch);
+                    in_token = true;
+                }
+            }
+        }
+    }
+    if in_token {
+        out.push(cur);
+    }
+    out
+}
+
+/// Whitelisted browser names accepted for --cookies-from-browser.
+fn valid_browser_source(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "chrome" | "firefox" | "edge" | "safari" | "brave" | "opera" | "vivaldi" | "chromium"
+    )
+}
+
+/// Sanitize a subtitle language list for --sub-langs: "all" or comma-separated
+/// BCP-47-ish tags. Anything else is dropped rather than failing the download.
+fn sanitize_sub_langs(raw: &str) -> Option<String> {
+    let r = raw.trim().to_lowercase();
+    if r.is_empty() {
+        return None;
+    }
+    if r == "all" {
+        return Some("all".to_string());
+    }
+    let langs: Vec<String> = r
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 12
+                && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        })
+        .collect();
+    if langs.is_empty() {
+        None
+    } else {
+        Some(langs.join(","))
+    }
+}
+
+/// Subtitle argv (--write-subs / --write-auto-subs / --sub-langs /
+/// --sub-format / --embed-subs) via yt-dlp's native options.
+fn append_subtitle_options(
+    args: &mut Vec<String>,
+    opts: &serde_json::Value,
+    flag: &dyn Fn(&serde_json::Value) -> bool,
+    text: &dyn Fn(&serde_json::Value) -> Option<String>,
+) {
+    let want_subs = opts.get("writeSubtitles").map(flag).unwrap_or(false);
+    let want_auto = opts.get("writeAutoSubs").map(flag).unwrap_or(false);
+    if !(want_subs || want_auto) {
+        return;
+    }
+    if let Some(langs) = opts
+        .get("subLangs")
+        .and_then(|v| v.as_str())
+        .and_then(sanitize_sub_langs)
+    {
+        args.push("--sub-langs".into());
+        args.push(langs);
+    }
+    if want_auto {
+        args.push("--write-auto-subs".into());
+    }
+    if want_subs {
+        args.push("--write-subs".into());
+    }
+    if let Some(fmt) = opts.get("subFormat").and_then(text) {
+        let f = fmt.to_lowercase();
+        if ["srt", "vtt", "ass", "ssa", "best"].contains(&f.as_str()) {
+            args.push("--sub-format".into());
+            args.push(f);
+        }
+    }
+    if opts.get("embedSubs").map(flag).unwrap_or(false) {
+        args.push("--embed-subs".into());
+    }
+}
+
+/// Metadata / thumbnail / chapter argv.
+fn append_metadata_options(
+    args: &mut Vec<String>,
+    opts: &serde_json::Value,
+    flag: &dyn Fn(&serde_json::Value) -> bool,
+) {
+    if opts.get("embedMetadata").map(flag).unwrap_or(false) {
+        args.push("--embed-metadata".into());
+    }
+    if opts.get("embedThumbnail").map(flag).unwrap_or(false) {
+        args.push("--embed-thumbnail".into());
+    }
+    if opts.get("writeThumbnailFile").map(flag).unwrap_or(false) {
+        args.push("--write-thumbnail".into());
+    }
+    if opts.get("writeDescription").map(flag).unwrap_or(false) {
+        args.push("--write-description".into());
+    }
+    if opts.get("writeInfoJson").map(flag).unwrap_or(false) {
+        args.push("--write-info-json".into());
+    }
+    if opts.get("writeComments").map(flag).unwrap_or(false) {
+        args.push("--write-comments".into());
+    }
+    // NOTE: yt-dlp has no `--write-chapters` flag (only --embed-chapters,
+    // --split-chapters, --remove-chapters and --download-sections). Chapter
+    // metadata is written to disk via --write-info-json, so nothing to add.
+    if opts.get("embedChapters").map(flag).unwrap_or(false) {
+        args.push("--embed-chapters".into());
+    }
+}
+
+
+/// Append the shared per-download options (subtitles / metadata / network) to
+/// the yt-dlp argv. Reads task["options"], which the frontend builds from the
+/// subtitles panel, metadata panel, audio controls and Network/Auth settings.
+fn append_download_options(args: &mut Vec<String>, task: &serde_json::Value) {
+    let opts = match task.get("options") {
+        Some(o) => o,
+        None => return,
+    };
+    let flag = |v: &serde_json::Value| v.as_bool().unwrap_or(false);
+    let text = |v: &serde_json::Value| {
+        v.as_str()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+
+    // ---- network ----
+    if let Some(proxy) = opts.get("proxy").and_then(text) {
+        if validate_proxy(&proxy).is_ok() {
+            args.push("--proxy".into());
+            args.push(proxy);
+        }
+    }
+    if let Some(kbps) = opts.get("rateLimitKbps").and_then(|v| v.as_u64()) {
+        if kbps > 0 {
+            args.push("--limit-rate".into());
+            args.push(format!("{}K", kbps));
+        }
+    }
+    if let Some(source) = opts.get("cookiesSource").and_then(text) {
+        if source == "file" {
+            if let Some(path) = opts.get("cookiesFilePath").and_then(text) {
+                if !path.starts_with('-') {
+                    args.push("--cookies".into());
+                    args.push(path);
+                }
+            }
+        } else if valid_browser_source(&source) {
+            args.push("--cookies-from-browser".into());
+            args.push(source.to_lowercase());
+        }
+    }
+    if opts.get("geoBypass").map(flag).unwrap_or(false) {
+        args.push("--geo-bypass".into());
+    }
+    if opts.get("verbose").map(flag).unwrap_or(false) {
+        args.push("--verbose".into());
+    }
+    if let Some(secs) = opts.get("networkTimeoutSecs").and_then(|v| v.as_u64()) {
+        if secs > 0 {
+            args.push("--socket-timeout".into());
+            args.push(secs.to_string());
+        }
+    }
+    if let Some(retries) = opts.get("retries").and_then(|v| v.as_u64()) {
+        args.push("--retries".into());
+        args.push(retries.to_string());
+    }
+    if let Some(mode) = opts.get("overwriteMode").and_then(text) {
+        match mode.to_lowercase().as_str() {
+            "overwrite" => args.push("--force-overwrites".into()),
+            "skip" => args.push("--no-overwrites".into()),
+            _ => {}
+        }
+    }
+
+    // ---- audio quality (audio-only downloads) ----
+    if let Some(q) = opts.get("audioQuality").and_then(text) {
+        if q != "best" {
+            let digits: String = q.chars().filter(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() {
+                args.push("--audio-quality".into());
+                args.push(format!("{}K", digits));
+            }
+        }
+    }
+
+    append_subtitle_options(args, opts, &flag, &text);
+    append_metadata_options(args, opts, &flag);
+
+    // ---- expert custom args, appended last ----
+    if let Some(custom) = opts.get("customArgs").and_then(text) {
+        for tok in split_custom_args(&custom) {
+            if !tok.is_empty() {
+                args.push(tok);
+            }
+        }
+    }
+}
+
+/// Compare dotted version strings ("2026.08.19" vs "2025.01.01").
+/// Returns 1 when b is newer, 0 when equal, -1 when b is older.
+fn compare_versions(a: &str, b: &str) -> i32 {
+    let parse = |s: &str| {
+        s.trim()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|p| p.parse::<i64>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    let va = parse(a);
+    let vb = parse(b);
+    let n = va.len().max(vb.len());
+    for i in 0..n {
+        let x = *va.get(i).unwrap_or(&0);
+        let y = *vb.get(i).unwrap_or(&0);
+        if x != y {
+            return if y > x { 1 } else { -1 };
+        }
+    }
+    0
+}
+
+/// Read the effective yt-dlp version (override binary first, sidecar second).
+fn current_ytdlp_version(app: &tauri::AppHandle) -> Option<String> {
+    let override_bin = ytdlp_override_path(app);
+    if !override_bin.is_empty() && std::path::Path::new(&override_bin).exists() {
+        if let Some(out) = run_custom_version(&override_bin, &["--version"]) {
+            if out.status.success() {
+                let v = out.stdout.trim().to_string();
+                if !v.is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    let mut cmd = Command::new_sidecar("yt-dlp").ok()?;
+    let out = cmd.args(&["--version"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = out.stdout.trim().to_string();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
 /// Probe the real size of the finished output file with ffprobe.
 async fn probe_file_size(path: &str) -> Option<u64> {
     let mut cmd = Command::new_sidecar("ffprobe").ok()?;
@@ -416,22 +960,61 @@ async fn probe_file_size(path: &str) -> Option<u64> {
 }
 
 #[tauri::command]
-async fn analyze_url(url: String) -> Result<serde_json::Value, String> {
+async fn analyze_url(
+    app: tauri::AppHandle,
+    url: String,
+    proxy: Option<String>,
+    cookies_source: Option<String>,
+    cookies_file: Option<String>,
+) -> Result<serde_json::Value, String> {
     validate_url(&url)?;
-    let mut cmd = Command::new_sidecar("yt-dlp")
-        .map_err(|e| format!("Failed to create sidecar: {}", e))?;
+
+    // Auth/network context so bot-checks and age-gates can be satisfied at
+    // analysis time too. Values come from Network & Auth settings; the proxy
+    // is re-validated here and cookies are never logged.
+    let mut net_args: Vec<String> = Vec::new();
+    if let Some(p) = proxy.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        validate_proxy(p)?;
+        net_args.push("--proxy".into());
+        net_args.push(p.to_string());
+    }
+    if let Some(src) = cookies_source.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "none") {
+        if src == "file" {
+            if let Some(path) = cookies_file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if path.starts_with('-') {
+                    return Err("Invalid cookies file path".to_string());
+                }
+                net_args.push("--cookies".into());
+                net_args.push(path.to_string());
+            }
+        } else if valid_browser_source(src) {
+            net_args.push("--cookies-from-browser".into());
+            net_args.push(src.to_lowercase());
+        }
+    }
+
+    // Prefer the user-updated override binary when present.
+    let override_bin = ytdlp_override_path(&app);
+    let use_override = !override_bin.is_empty() && std::path::Path::new(&override_bin).exists();
+    let mut cmd: tauri::api::process::Command = if use_override {
+        use tauri::api::process::Command as SidecarCommand;
+        SidecarCommand::new(override_bin.clone())
+    } else {
+        Command::new_sidecar("yt-dlp").map_err(|e| format!("Failed to create sidecar: {}", e))?
+    };
 
     // FAST PATH: try a flat playlist extraction first. --flat-playlist only
     // fetches the playlist manifest (titles + URLs) without requesting full
     // metadata for every video, which turns minutes of analysis into seconds.
+    let mut flat_args: Vec<String> = Vec::new();
+    flat_args.extend(net_args.clone());
+    flat_args.push("--flat-playlist".into());
+    flat_args.push("--dump-single-json".into());
+    flat_args.push("--no-warnings".into());
+    flat_args.push("--".into());
+    flat_args.push(url.trim().to_string());
     let flat_output = cmd
-        .args(&[
-            "--flat-playlist",
-            "--dump-single-json",
-            "--no-warnings",
-            "--",
-            url.trim(),
-        ])
+        .args(&flat_args)
         .output()
         .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
 
@@ -495,11 +1078,22 @@ async fn analyze_url(url: String) -> Result<serde_json::Value, String> {
     }
 
     // SLOW PATH: single media item — full metadata including all formats.
-    let mut cmd = Command::new_sidecar("yt-dlp")
-        .map_err(|e| format!("Failed to create sidecar: {}", e))?;
+    let mut cmd2: tauri::api::process::Command = if use_override {
+        use tauri::api::process::Command as SidecarCommand;
+        SidecarCommand::new(override_bin.clone())
+    } else {
+        Command::new_sidecar("yt-dlp").map_err(|e| format!("Failed to create sidecar: {}", e))?
+    };
 
-    let output = cmd
-        .args(&["--dump-single-json", "--no-warnings", "--no-playlist", "--", url.trim()])
+    let mut single_args: Vec<String> = Vec::new();
+    single_args.extend(net_args);
+    single_args.push("--dump-single-json".into());
+    single_args.push("--no-warnings".into());
+    single_args.push("--no-playlist".into());
+    single_args.push("--".into());
+    single_args.push(url.trim().to_string());
+    let output = cmd2
+        .args(&single_args)
         .output()
         .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
 
@@ -687,6 +1281,10 @@ async fn start_download(
         }
     }
 
+    // Per-download options (subtitles / metadata / network) — Phase A wiring.
+    let mut option_args: Vec<String> = Vec::new();
+    append_download_options(&mut option_args, &task);
+
     // Signal "downloading" status immediately
     let _ = app_handle.emit_all(
         &format!("download-progress-{}", task_id),
@@ -719,7 +1317,14 @@ async fn start_download(
         let mut dest_count: u32 = 0;
         let mut announced_part: u32 = 0;
         let mut had_stream_progress = false;
-        let cmd = Command::new_sidecar("yt-dlp");
+        // Prefer the user-updated override binary when present.
+        let override_bin = ytdlp_override_path(&app_handle);
+        let cmd: Result<tauri::api::process::Command, _> =
+            if !override_bin.is_empty() && std::path::Path::new(&override_bin).exists() {
+                Ok(tauri::api::process::Command::new(override_bin.clone()))
+            } else {
+                Command::new_sidecar("yt-dlp")
+            };
         if let Ok(mut c) = cmd {
             let mut all_args: Vec<String> = vec![
                 "-f".to_string(),
@@ -737,6 +1342,7 @@ async fn start_download(
                 }
             }
             all_args.extend(container_args);
+            all_args.extend(option_args);
             all_args.extend([
                 "--newline".to_string(),
                 "--progress".to_string(),
@@ -1031,10 +1637,13 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             check_dependencies,
+            check_ytdlp_update,
+            update_ytdlp,
             analyze_url,
             start_download,
             pause_download,
             cancel_download,
+            open_file,
             open_folder,
             load_config,
             save_config,

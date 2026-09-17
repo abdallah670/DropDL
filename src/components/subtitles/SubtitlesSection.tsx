@@ -3,12 +3,13 @@ import { FileText, Check, Download } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 
 export const SubtitlesSection: React.FC = () => {
-  const { mediaInfo, subtitlesConfig, updateSubtitlesConfig, enqueueCurrentDownload } = useAppStore();
+  const { mediaInfo, subtitlesConfig, updateSubtitlesConfig, enqueueCurrentDownload, outputContainer, mediaMode } = useAppStore();
 
   if (!mediaInfo) return null;
 
   const normalSubs = mediaInfo.subtitles ? Object.keys(mediaInfo.subtitles) : [];
   const autoSubs = mediaInfo.automatic_captions ? Object.keys(mediaInfo.automatic_captions) : [];
+  const webmEmbedBlocked = mediaMode !== "audio-only" && outputContainer === "WebM" && subtitlesConfig.embedSubs;
 
   const handleToggleLang = (lang: string) => {
     const exists = subtitlesConfig.selectedLangs.includes(lang);
@@ -25,6 +26,54 @@ export const SubtitlesSection: React.FC = () => {
 
   return (
     <div id="subtitles-section" className="space-y-4 select-none">
+      {/* Master switch */}
+      <div className="p-4 rounded-lg bg-neutral-900 border border-neutral-800">
+        <label className="flex items-start space-x-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={subtitlesConfig.downloadEnabled}
+            onChange={(e) => updateSubtitlesConfig({ downloadEnabled: e.target.checked })}
+            className="mt-0.5 rounded border-neutral-700 bg-neutral-950 text-emerald-600 focus:ring-0"
+          />
+          <div>
+            <span className="text-xs font-semibold text-neutral-200 block">
+              Download subtitles
+            </span>
+            <p className="text-[11px] text-neutral-400 leading-snug">
+              Fetched with yt-dlp's native subtitle options — nothing is downloaded manually.
+            </p>
+          </div>
+        </label>
+
+        {subtitlesConfig.downloadEnabled && (
+          <div className="mt-3 pt-3 border-t border-neutral-800/80 space-y-3">
+            <div>
+              <span className="text-xs text-neutral-400 block mb-2">Language:</span>
+              <div className="flex flex-wrap gap-2 text-xs">
+                <button
+                  onClick={() => updateSubtitlesConfig({ allLangs: false })}
+                  className={`px-3 py-1.5 rounded border transition-all ${!subtitlesConfig.allLangs
+                    ? "bg-emerald-600 border-emerald-500 text-white font-semibold"
+                    : "bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-neutral-200"}`}
+                >
+                  Selected languages
+                </button>
+                <button
+                  onClick={() => updateSubtitlesConfig({ allLangs: true })}
+                  className={`px-3 py-1.5 rounded border transition-all ${subtitlesConfig.allLangs
+                    ? "bg-emerald-600 border-emerald-500 text-white font-semibold"
+                    : "bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-neutral-200"}`}
+                >
+                  All available
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {subtitlesConfig.downloadEnabled && !subtitlesConfig.allLangs && (
+      <div>
       {/* Language Checklist */}
       <div className="p-4 rounded-lg bg-neutral-900 border border-neutral-800 space-y-3">
         <div className="flex items-center justify-between">
@@ -91,10 +140,18 @@ export const SubtitlesSection: React.FC = () => {
       </div>
 
       {/* Subtitle Handling Options */}
+      {subtitlesConfig.downloadEnabled && (
       <div className="p-4 rounded-lg bg-neutral-900 border border-neutral-800 space-y-4">
         <label className="text-xs font-semibold text-neutral-300 uppercase font-mono tracking-wider block">
           Subtitle Output Strategy
         </label>
+
+        {webmEmbedBlocked && (
+          <div className="p-3 rounded bg-amber-950/40 border border-amber-800/60 text-[11px] text-amber-200 leading-snug">
+            Embedding is not supported for the WebM container — subtitles will be saved as
+            separate files instead. Choose MP4 or MKV in the quality panel to embed them.
+          </div>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
           <label
@@ -165,7 +222,10 @@ export const SubtitlesSection: React.FC = () => {
             ))}
           </div>
         </div>
+        </div>
+        )}
       </div>
+      )}
 
       <div className="pt-2 flex justify-end">
         <button
